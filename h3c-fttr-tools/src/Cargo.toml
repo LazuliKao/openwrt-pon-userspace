@@ -1,0 +1,22 @@
+[package]
+name = "h3c-fttr-tools"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "H3C HM2004-DU FTTR Micro-OLT utilities and controller daemon"
+repository = "https://github.com/pbs05/openwrt-pon-userspace"
+
+[[bin]]
+name = "fttrctl"
+path = "src/bin/fttrctl.rs"
+
+[[bin]]
+name = "fttrd"
+path = "src/bin/fttrd.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
