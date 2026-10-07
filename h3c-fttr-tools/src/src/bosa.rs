@@ -260,7 +260,7 @@ pub fn get_optical_status() -> OpticalTransceiverStatus {
         }
     }
     if let Ok(b_val) = read_bosa_reg(0x13) {
-        if b_val > 0 {
+        if b_val > 0 && b_val < 255 {
             bias = (b_val as f32) * 0.15;
             tx_pwr = 1.5 + (bias - 10.0) * 0.2;
         }
@@ -277,6 +277,68 @@ pub fn get_optical_status() -> OpticalTransceiverStatus {
         temperature_celsius: (temp * 10.0).round() / 10.0,
         vcc_voltage: vcc,
         cdr_locked,
+    }
+}
+
+#[repr(C)]
+pub struct PloamMsg {
+    pub data: [u8; 16],
+    pub len: u32,
+}
+
+const IOC_RECV_PLOAM: u64 = 0x8014A505;
+const IOC_SEND_PACKET: u64 = 0x4014A506;
+
+pub fn send_ploam_msg(data: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(FMCS_MCI_DEV)?;
+
+        let mut msg = PloamMsg {
+            data: [0u8; 16],
+            len: data.len() as u32,
+        };
+        let copy_len = data.len().min(16);
+        msg.data[..copy_len].copy_from_slice(&data[..copy_len]);
+
+        let ret = unsafe { ioctl(file.as_raw_fd(), IOC_SEND_PACKET, &msg as *const _) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = data;
+        Ok(())
+    }
+}
+
+pub fn recv_ploam_msg() -> io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(FMCS_MCI_DEV)?;
+
+        let mut msg = PloamMsg {
+            data: [0u8; 16],
+            len: 0,
+        };
+
+        let ret = unsafe { ioctl(file.as_raw_fd(), IOC_RECV_PLOAM, &mut msg as *mut _) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(msg.data[..msg.len as usize].to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Vec::new())
     }
 }
 

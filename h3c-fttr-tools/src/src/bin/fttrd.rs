@@ -15,19 +15,22 @@ use h3c_fttr_tools::mqtt::MqttClient;
 use h3c_fttr_tools::pon_engine::PonEngine;
 
 fn setup_bridge() {
-    let eth1_path = Path::new("/sys/class/net/eth1");
-    if !eth1_path.exists() {
-        println!("[*] Physical interface eth1 not present, skipping VLAN eth1.1~eth1.16 bridge (control plane is active).");
+    let ifname_base = if Path::new("/sys/class/net/lan1").exists() {
+        "lan1"
+    } else if Path::new("/sys/class/net/eth1").exists() {
+        "eth1"
+    } else {
+        println!("[*] Neither lan1 nor eth1 present, skipping VLAN bridge (control plane is active).");
         return;
-    }
+    };
 
-    println!("[*] Initializing downstream FTTR network bridges...");
-    let _ = Command::new("ip").args(["link", "set", "eth1", "up"]).status();
+    println!("[*] Initializing downstream FTTR network bridges on {ifname_base}...");
+    let _ = Command::new("ip").args(["link", "set", ifname_base, "up"]).status();
 
     for id in 1..=16 {
-        let ifname = format!("eth1.{id}");
+        let ifname = format!("{ifname_base}.{id}");
         let _ = Command::new("ip")
-            .args(["link", "add", "link", "eth1", "name", &ifname, "type", "vlan", "id", &id.to_string()])
+            .args(["link", "add", "link", ifname_base, "name", &ifname, "type", "vlan", "id", &id.to_string()])
             .status();
         let _ = Command::new("ip").args(["link", "set", &ifname, "up"]).status();
         let _ = Command::new("ip").args(["link", "set", &ifname, "master", "br-lan"]).status();
@@ -195,6 +198,10 @@ fn start_ipc_server(
                 } else if line == "DISCOVER" {
                     let engine = pon_engine.lock().unwrap();
                     let frames = engine.build_discovery_frames();
+                    for frame in &frames {
+                        let bytes = frame.to_bytes();
+                        let _ = bosa::send_ploam_msg(&bytes);
+                    }
                     let _ = stream.write_all(
                         format!("{{\"status\": \"discovery_dispatched\", \"frames\": {}}}\n", frames.len()).as_bytes(),
                     );

@@ -111,6 +111,59 @@ fn main() {
                 Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
             }
         }
+        "read-reg" => {
+            if args.len() < 3 {
+                eprintln!("Usage: fttrctl read-reg <addr>");
+                exit(1);
+            }
+            let addr_str = &args[2];
+            let addr = u32::from_str_radix(addr_str.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                .expect("Invalid hex address");
+            match bosa::read_fpga_reg(addr) {
+                Ok(val) => println!("FPGA [0x{:08X}] = 0x{:08X}", addr, val),
+                Err(e) => eprintln!("[-] Error reading FPGA register: {e}"),
+            }
+        }
+        "write-reg" => {
+            if args.len() < 4 {
+                eprintln!("Usage: fttrctl write-reg <addr> <val>");
+                exit(1);
+            }
+            let addr = u32::from_str_radix(args[2].trim_start_matches("0x").trim_start_matches("0X"), 16)
+                .expect("Invalid hex address");
+            let val = u32::from_str_radix(args[3].trim_start_matches("0x").trim_start_matches("0X"), 16)
+                .expect("Invalid hex value");
+            match bosa::write_fpga_reg(addr, val) {
+                Ok(_) => println!("FPGA [0x{:08X}] <= 0x{:08X}", addr, val),
+                Err(e) => eprintln!("[-] Error writing FPGA register: {e}"),
+            }
+        }
+        "read-bosa" => {
+            if args.len() < 3 {
+                eprintln!("Usage: fttrctl read-bosa <reg>");
+                exit(1);
+            }
+            let reg = u32::from_str_radix(args[2].trim_start_matches("0x").trim_start_matches("0X"), 16)
+                .expect("Invalid hex register");
+            match bosa::read_bosa_reg(reg) {
+                Ok(val) => println!("BOSA [0x{:02X}] = 0x{:02X}", reg, val),
+                Err(e) => eprintln!("[-] Error reading BOSA register: {e}"),
+            }
+        }
+        "write-bosa" => {
+            if args.len() < 4 {
+                eprintln!("Usage: fttrctl write-bosa <reg> <val>");
+                exit(1);
+            }
+            let reg = u32::from_str_radix(args[2].trim_start_matches("0x").trim_start_matches("0X"), 16)
+                .expect("Invalid hex register");
+            let val = u32::from_str_radix(args[3].trim_start_matches("0x").trim_start_matches("0X"), 16)
+                .expect("Invalid hex value");
+            match bosa::write_bosa_reg(reg, val) {
+                Ok(_) => println!("BOSA [0x{:02X}] <= 0x{:02X}", reg, val),
+                Err(e) => eprintln!("[-] Error writing BOSA register: {e}"),
+            }
+        }
         "help" | "--help" | "-h" => {
             print_usage();
         }
