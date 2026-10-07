@@ -16,16 +16,18 @@ start_service() {
 
 	echo "[*] Initializing H3C FTTR Micro-OLT Subsystem..."
 
-	# 1. Program FPGA Bitstream if present
-	if [ -f /lib/firmware/FTTR_TOP.sbit ]; then
-		/usr/sbin/open_fpga_load /lib/firmware/FTTR_TOP.sbit
+	# 1. Program FPGA Bitstream if needed (fallback if not auto-loaded by driver)
+	if [ -f /lib/firmware/FTTR_TOP.sbit ] && [ ! -e /sys/devices/platform/fmcs/reload_fpga ]; then
+		/usr/sbin/fttrctl load-fpga /lib/firmware/FTTR_TOP.sbit 2>/dev/null || true
 	fi
 
 	# 2. Setup interfaces
-	ip link set eth1 up 2>/dev/null
-	ip link add link eth1 name eth1.1 type vlan id 1 2>/dev/null
-	ip link set eth1.1 up 2>/dev/null
-	ip link set eth1.1 master br-lan 2>/dev/null || brctl addif br-lan eth1.1 2>/dev/null
+	if [ -d /sys/class/net/eth1 ]; then
+		ip link set eth1 up 2>/dev/null
+		ip link add link eth1 name eth1.1 type vlan id 1 2>/dev/null
+		ip link set eth1.1 up 2>/dev/null
+		ip link set eth1.1 master br-lan 2>/dev/null || brctl addif br-lan eth1.1 2>/dev/null
+	fi
 
 	# 3. Start Controller Daemon
 	procd_open_instance

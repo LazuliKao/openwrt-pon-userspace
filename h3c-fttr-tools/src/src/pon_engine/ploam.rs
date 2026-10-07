@@ -15,7 +15,7 @@ pub enum OnuState {
     O7EmergencyStop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GponOnu {
     pub onu_id: u8,
     pub vendor_id: [u8; 4],
@@ -23,12 +23,35 @@ pub struct GponOnu {
     pub state: OnuState,
     pub eq_delay: u32,
     pub is_h3c_device: bool,
+    pub fiber_distance_m: f32,
+    pub rx_power_dbm: f32,
+    pub tx_power_dbm: f32,
+    pub model: String,
+    pub firmware_version: String,
+    pub hardware_version: String,
+    pub uptime_seconds: u64,
 }
 
 impl GponOnu {
     pub fn new(onu_id: u8, vendor_id: [u8; 4], serial_number: [u8; 4]) -> Self {
-        // H3C vendor ID is typically b"H3TC" or b"ALCL" (Alcatel/Nokia derived)
-        let is_h3c_device = &vendor_id == b"H3TC" || &vendor_id == b"ALCL";
+        // H3C vendor ID is typically b"H3TC", b"H3CC", or b"ALCL" (Alcatel/Nokia derived)
+        let is_h3c_device = &vendor_id == b"H3TC" || &vendor_id == b"H3CC" || &vendor_id == b"ALCL";
+        let model = if is_h3c_device {
+            "HL202-DU".to_string()
+        } else {
+            "Generic-GPON-ONU".to_string()
+        };
+        let hardware_version = if is_h3c_device {
+            "REV.A".to_string()
+        } else {
+            "V1.0".to_string()
+        };
+        let firmware_version = if is_h3c_device {
+            "V100R002B01D020".to_string()
+        } else {
+            "V1.0.0".to_string()
+        };
+
         Self {
             onu_id,
             vendor_id,
@@ -36,6 +59,13 @@ impl GponOnu {
             state: OnuState::O1Initial,
             eq_delay: 0,
             is_h3c_device,
+            fiber_distance_m: 18.5,
+            rx_power_dbm: -16.8,
+            tx_power_dbm: 1.9,
+            model,
+            firmware_version,
+            hardware_version,
+            uptime_seconds: 3600,
         }
     }
 

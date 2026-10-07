@@ -24,6 +24,12 @@ Commands:\n  \
 }
 
 fn setup_bridge() {
+    let eth1_path = Path::new("/sys/class/net/eth1");
+    if !eth1_path.exists() {
+        println!("[*] Physical interface eth1 not present, skipping VLAN eth1.1~eth1.16 bridge (control plane is active).");
+        return;
+    }
+
     println!("[*] Configuring downstream FTTR network bridges...");
     let _ = Command::new("ip").args(["link", "set", "eth1", "up"]).status();
 

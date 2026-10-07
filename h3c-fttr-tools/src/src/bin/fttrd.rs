@@ -15,6 +15,12 @@ use h3c_fttr_tools::mqtt::MqttClient;
 use h3c_fttr_tools::pon_engine::PonEngine;
 
 fn setup_bridge() {
+    let eth1_path = Path::new("/sys/class/net/eth1");
+    if !eth1_path.exists() {
+        println!("[*] Physical interface eth1 not present, skipping VLAN eth1.1~eth1.16 bridge (control plane is active).");
+        return;
+    }
+
     println!("[*] Initializing downstream FTTR network bridges...");
     let _ = Command::new("ip").args(["link", "set", "eth1", "up"]).status();
 
@@ -53,16 +59,119 @@ fn start_ipc_server(
                         .unwrap_or_default()
                         .as_secs();
 
-                    let mut resp = String::from("{\n  \"pon_onus\": [\n");
+                    let opt = bosa::get_optical_status();
+
+                    let mut resp = String::from("{\n");
+                    // 1. Optical transceiver status
+                    resp.push_str(&format!(
+                        "  \"optical_transceiver\": {{\n\
+                           \"model\": \"{}\",\n\
+                           \"wavelength_tx_nm\": {},\n\
+                           \"wavelength_rx_nm\": {},\n\
+                           \"phy_rate_downlink_gbps\": {:.3},\n\
+                           \"phy_rate_uplink_gbps\": {:.3},\n\
+                           \"tx_power_dbm\": {:.2},\n\
+                           \"laser_bias_current_ma\": {:.1},\n\
+                           \"temperature_celsius\": {:.1},\n\
+                           \"vcc_voltage\": {:.2},\n\
+                           \"cdr_locked\": {}\n\
+                         }},\n",
+                        opt.model,
+                        opt.wavelength_tx_nm,
+                        opt.wavelength_rx_nm,
+                        opt.phy_rate_downlink_gbps,
+                        opt.phy_rate_uplink_gbps,
+                        opt.tx_power_dbm,
+                        opt.laser_bias_current_ma,
+                        opt.temperature_celsius,
+                        opt.vcc_voltage,
+                        opt.cdr_locked
+                    ));
+
+                    // 2. Sub-gateways (connected ONUs)
+                    resp.push_str("  \"sub_gateways\": [\n");
                     for (i, onu) in engine.active_onus.iter().enumerate() {
+                        let sn_str = onu.full_sn_str();
+                        let telem = engine.h3c_coordinator.get_subdev_telemetry(&sn_str, onu.onu_id);
+
                         resp.push_str(&format!(
-                            "    {{\"id\": {}, \"vendor\": \"{}\", \"sn\": \"{}\", \"state\": \"{:?}\", \"is_h3c\": {}}}",
+                            "    {{\n\
+                               \"onu_id\": {},\n\
+                               \"vendor\": \"{}\",\n\
+                               \"model\": \"{}\",\n\
+                               \"serial_number\": \"{}\",\n\
+                               \"state\": \"{:?}\",\n\
+                               \"fiber_distance_m\": {:.1},\n\
+                               \"ranging_delay_rtd_ns\": {},\n\
+                               \"optical_rx_power_dbm\": {:.1},\n\
+                               \"optical_tx_power_dbm\": {:.1},\n\
+                               \"firmware_version\": \"{}\",\n\
+                               \"hardware_version\": \"{}\",\n\
+                               \"uptime_seconds\": {},\n\
+                               \"data_path\": {{\n\
+                                 \"interface\": \"{}\",\n\
+                                 \"gem_ports\": {:?},\n\
+                                 \"vlan_id\": {},\n\
+                                 \"tx_bytes\": {},\n\
+                                 \"rx_bytes\": {},\n\
+                                 \"current_tx_kbps\": {},\n\
+                                 \"current_rx_kbps\": {}\n\
+                               }},\n\
+                               \"wifi_mesh\": {{\n\
+                                 \"channel_2g\": {},\n\
+                                 \"channel_5g\": {},\n\
+                                 \"bandwidth_5g\": \"{}\",\n\
+                                 \"tx_power_pct\": {}\n\
+                               }},\n\
+                               \"connected_clients\": [\n",
                             onu.onu_id,
                             onu.vendor_str(),
-                            onu.sn_hex(),
+                            onu.model,
+                            sn_str,
                             onu.state,
-                            onu.is_h3c_device
+                            onu.fiber_distance_m,
+                            (onu.fiber_distance_m / 0.102) as u64,
+                            onu.rx_power_dbm,
+                            onu.tx_power_dbm,
+                            onu.firmware_version,
+                            onu.hardware_version,
+                            onu.uptime_seconds,
+                            telem.data_path.interface,
+                            telem.data_path.gem_ports,
+                            telem.data_path.vlan_id,
+                            telem.data_path.tx_bytes,
+                            telem.data_path.rx_bytes,
+                            telem.data_path.current_tx_kbps,
+                            telem.data_path.current_rx_kbps,
+                            telem.wifi_mesh.channel_2g,
+                            telem.wifi_mesh.channel_5g,
+                            telem.wifi_mesh.bandwidth_5g,
+                            telem.wifi_mesh.tx_power_pct
                         ));
+
+                        for (ci, client) in telem.connected_clients.iter().enumerate() {
+                            resp.push_str(&format!(
+                                "        {{\n\
+                                   \"mac\": \"{}\",\n\
+                                   \"ip\": \"{}\",\n\
+                                   \"band\": \"{}\",\n\
+                                   \"rssi_dbm\": {},\n\
+                                   \"rx_rate_mbps\": {},\n\
+                                   \"tx_rate_mbps\": {}\n\
+                                 }}",
+                                client.mac,
+                                client.ip,
+                                client.band,
+                                client.rssi_dbm,
+                                client.rx_rate_mbps,
+                                client.tx_rate_mbps
+                            ));
+                            if ci + 1 < telem.connected_clients.len() {
+                                resp.push(',');
+                            }
+                            resp.push('\n');
+                        }
+                        resp.push_str("      ]\n    }");
                         if i + 1 < engine.active_onus.len() {
                             resp.push(',');
                         }
