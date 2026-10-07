@@ -18,6 +18,8 @@ Commands:\n  \
   status               Display active FTTR optical link and downlinked sub-gateways\n  \
   discover             Trigger PLOAM discovery sequence on optical link\n  \
   register <sn>        Register and activate sub-gateway by SN (e.g. H3CT685DF998)\n  \
+  auth [onu_id]        Send OMCI LOID authentication success to sub-gateway (default: 1)\n  \
+  sync-wifi            Push Wi-Fi SSID and credentials to sub-gateways via MQTT\n  \
   provision <onu_id>   Trigger G.988 OMCI provisioning for specific ONU\n  \
   exec <sn> <command>  Dispatch execution command to sub-gateway via MQTT\n  \
   help                 Show this help message"
@@ -98,6 +100,20 @@ fn main() {
             let sn = &args[2];
             let payload = format!("REGISTER {sn}");
             match ipc::send_ipc_command(&payload) {
+                Ok(resp) => println!("{resp}"),
+                Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
+            }
+        },
+        "auth" => {
+            let id = args.get(2).map(|s| s.as_str()).unwrap_or("1");
+            let payload = format!("AUTH {id}");
+            match ipc::send_ipc_command(&payload) {
+                Ok(resp) => println!("{resp}"),
+                Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
+            }
+        },
+        "sync-wifi" => {
+            match ipc::send_ipc_command("SYNC_WIFI") {
                 Ok(resp) => println!("{resp}"),
                 Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
             }

@@ -93,15 +93,18 @@ impl PonEngine {
 
         // 1. MIB Reset
         frames.push(OmciMessage::mib_reset(self.next_tx_id()));
-        // 2. Provision T-CONT
+        // 2. LOID Authentication (ME 65530 / 0xFFFA - China Unicom / H3C standard)
+        frames.push(OmciMessage::loid_auth_success(self.next_tx_id()));
+        frames.push(OmciMessage::loid_auth_with_name(self.next_tx_id(), "subGateway"));
+        // 3. Provision T-CONT
         frames.push(OmciMessage::create_tcont(self.next_tx_id(), tcont_inst, alloc_id));
-        // 3. Provision GEM Port
+        // 4. Provision GEM Port
         frames.push(OmciMessage::create_gem_port(self.next_tx_id(), gem_port_id, tcont_inst));
-        // 4. Provision GEM Interworking TP
+        // 5. Provision GEM Interworking TP
         frames.push(OmciMessage::create_gem_interworking_tp(self.next_tx_id(), gem_port_id));
-        // 5. Provision MAC Bridge
+        // 6. Provision MAC Bridge
         frames.push(OmciMessage::create_mac_bridge_service_profile(self.next_tx_id(), 1));
-        // 6. Unlock Ethernet Port
+        // 7. Unlock Ethernet Port
         frames.push(OmciMessage::unlock_ethernet_uni(self.next_tx_id(), 1));
 
         frames

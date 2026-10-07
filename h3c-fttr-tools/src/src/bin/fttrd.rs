@@ -12,6 +12,7 @@ use h3c_fttr_tools::bosa;
 use h3c_fttr_tools::fpga;
 use h3c_fttr_tools::ipc::{self, SubDevice};
 use h3c_fttr_tools::mqtt::MqttClient;
+use h3c_fttr_tools::pon_engine::omci;
 use h3c_fttr_tools::pon_engine::PonEngine;
 
 fn setup_bridge() {
@@ -234,6 +235,10 @@ fn start_ipc_server(
                             let _ = bosa::send_ploam_msg(&f.to_bytes());
                             thread::sleep(Duration::from_millis(10));
                         }
+                        for f in &omci_frames {
+                            let _ = omci::send_omci_frame(onu.onu_id, f);
+                            thread::sleep(Duration::from_millis(20));
+                        }
 
                         let _ = stream.write_all(
                             format!(
@@ -248,12 +253,43 @@ fn start_ipc_server(
                     if let Ok(id) = line["PROVISION ".len()..].trim().parse::<u8>() {
                         let mut engine = pon_engine.lock().unwrap();
                         let omci_frames = engine.build_omci_provisioning(id);
+                        drop(engine);
+                        for f in &omci_frames {
+                            let _ = omci::send_omci_frame(id, f);
+                            thread::sleep(Duration::from_millis(20));
+                        }
                         let _ = stream.write_all(
                             format!("{{\"status\": \"provisioned\", \"omci_messages\": {}}}\n", omci_frames.len()).as_bytes(),
                         );
                     } else {
                         let _ = stream.write_all(b"{\"error\": \"invalid onu id\"}\n");
                     }
+                } else if line.starts_with("AUTH ") {
+                    if let Ok(id) = line["AUTH ".len()..].trim().parse::<u8>() {
+                        let mut engine = pon_engine.lock().unwrap();
+                        let tx1 = engine.next_tx_id();
+                        let f1 = omci::OmciMessage::loid_auth_success(tx1);
+                        let tx2 = engine.next_tx_id();
+                        let f2 = omci::OmciMessage::loid_auth_with_name(tx2, "subGateway");
+                        drop(engine);
+
+                        let _ = omci::send_omci_frame(id, &f1);
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = omci::send_omci_frame(id, &f2);
+
+                        let _ = stream.write_all(
+                            format!("{{\"status\": \"auth_sent\", \"onu_id\": {}}}\n", id).as_bytes(),
+                        );
+                    } else {
+                        let _ = stream.write_all(b"{\"error\": \"invalid onu id\"}\n");
+                    }
+                } else if line == "SYNC_WIFI" {
+                    let engine = pon_engine.lock().unwrap();
+                    let mut client_lock = mqtt_tx.lock().unwrap();
+                    for onu in &engine.active_onus {
+                        engine.h3c_coordinator.sync_wifi_mesh(onu, &mut *client_lock);
+                    }
+                    let _ = stream.write_all(b"{\"status\": \"wifi_synced\"}\n");
                 } else if line.starts_with("EXEC ") {
                     let parts: Vec<&str> = line["EXEC ".len()..].splitn(2, ' ').collect();
                     if parts.len() == 2 {
@@ -299,12 +335,16 @@ fn main() {
         let sn = [0x68, 0x5D, 0xF9, 0x98];
         let onu = engine.register_onu(vendor, sn);
         let act_frames = engine.activate_onu(onu.onu_id);
-        let _omci = engine.build_omci_provisioning(onu.onu_id);
+        let omci_frames = engine.build_omci_provisioning(onu.onu_id);
         drop(engine);
 
         for f in &act_frames {
             let _ = bosa::send_ploam_msg(&f.to_bytes());
             thread::sleep(Duration::from_millis(10));
+        }
+        for f in &omci_frames {
+            let _ = omci::send_omci_frame(onu.onu_id, f);
+            thread::sleep(Duration::from_millis(20));
         }
         println!("[+] Sub-gateway H3CT685DF998 registered & activated as ONU-ID {} (State: O5Operation).", onu.onu_id);
     }
@@ -349,12 +389,16 @@ fn main() {
                             let mut engine = pon_engine_ploam.lock().unwrap();
                             let onu = engine.register_onu(vendor, sn);
                             let act_frames = engine.activate_onu(onu.onu_id);
-                            let _omci = engine.build_omci_provisioning(onu.onu_id);
+                            let omci_frames = engine.build_omci_provisioning(onu.onu_id);
                             drop(engine);
 
                             for f in &act_frames {
                                 let _ = bosa::send_ploam_msg(&f.to_bytes());
                                 thread::sleep(Duration::from_millis(10));
+                            }
+                            for f in &omci_frames {
+                                let _ = omci::send_omci_frame(onu.onu_id, f);
+                                thread::sleep(Duration::from_millis(20));
                             }
                             println!("[+] ONU {} successfully activated in state O5Operation!", onu.onu_id);
                         }
@@ -382,9 +426,13 @@ fn main() {
     let mut last_ping = Instant::now();
 
     loop {
+        *mqtt_client_arc.lock().unwrap() = None;
         let mut client = match MqttClient::connect("127.0.0.1:1883", "h3c-fttrd-rust") {
             Ok(c) => {
                 println!("[+] Connected to local MQTT broker!");
+                if let Ok(cloned) = c.try_clone() {
+                    *mqtt_client_arc.lock().unwrap() = Some(cloned);
+                }
                 c
             }
             Err(_) => {

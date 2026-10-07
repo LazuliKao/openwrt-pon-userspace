@@ -49,6 +49,12 @@ impl MqttClient {
         Ok(MqttClient { stream })
     }
 
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(MqttClient {
+            stream: self.stream.try_clone()?,
+        })
+    }
+
     pub fn subscribe(&mut self, topic: &str) -> io::Result<()> {
         let mut var_header = Vec::new();
         var_header.extend_from_slice(&1u16.to_be_bytes()); // Packet ID = 1

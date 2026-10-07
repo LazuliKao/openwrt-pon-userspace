@@ -22,8 +22,8 @@ pub struct H3cMeshCoordinator {
 impl H3cMeshCoordinator {
     pub fn new() -> Self {
         Self {
-            main_ssid: String::from("H3C_FTTR_Wi-Fi6"),
-            main_key: String::from("12345678"),
+            main_ssid: String::from("ImmortalWrt"),
+            main_key: String::new(),
         }
     }
 
@@ -58,13 +58,19 @@ impl H3cMeshCoordinator {
 
         // Send Wi-Fi mesh sync payload via local MQTT broker if available
         if let Some(ref mut client) = mqtt {
-            let topic = format!("/fttr/subdev/config/{sn_str}");
+            let topics = [
+                format!("/fttr/subdev/config/{sn_str}"),
+                format!("/fttr/maindev/cmd/{sn_str}"),
+                format!("/fttr/maindev/config/{sn_str}"),
+            ];
             let payload = format!(
-                "{{\"action\":\"mesh_sync\",\"ssid\":\"{}\",\"wpa_key\":\"{}\",\"roaming\":true}}",
+                "{{\"action\":\"mesh_sync\",\"ssid\":\"{}\",\"wpa_key\":\"{}\",\"encryption\":\"none\",\"channel_2g\":1,\"channel_5g\":44,\"roaming\":true}}",
                 self.main_ssid, self.main_key
             );
-            let _ = client.publish(&topic, payload.as_bytes());
-            println!("[+] Mesh config dispatched to MQTT topic: {topic}");
+            for topic in &topics {
+                let _ = client.publish(topic, payload.as_bytes());
+                println!("[+] Mesh config dispatched to MQTT topic: {topic}");
+            }
         }
     }
 
