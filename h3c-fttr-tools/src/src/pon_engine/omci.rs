@@ -192,7 +192,7 @@ struct SockAddrLl {
 extern "C" {
     fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
     fn sendto(s: i32, buf: *const u8, len: usize, flags: i32, to: *const SockAddrLl, tolen: u32) -> isize;
-    fn if_nametoindex(ifname: *const i8) -> u32;
+    fn if_nametoindex(ifname: *const std::ffi::c_char) -> u32;
     fn close(fd: i32) -> i32;
 }
 
