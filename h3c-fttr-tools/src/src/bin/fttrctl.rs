@@ -14,9 +14,10 @@ fn print_usage() {
 Commands:\n  \
   load-fpga [path]     Program FPGA bitstream (default: /lib/firmware/FTTR_TOP.sbit)\n  \
   bosa-init            Initialize BOSA optical transceiver registers\n  \
-  bridge-setup         Ensure downstream FTTR VLANs (eth1.1~eth1.16) are bridged to br-lan\n  \
+  bridge-setup         Ensure downstream FTTR VLANs (lan1/eth1.1~16) are bridged to br-lan\n  \
   status               Display active FTTR optical link and downlinked sub-gateways\n  \
   discover             Trigger PLOAM discovery sequence on optical link\n  \
+  register <sn>        Register and activate sub-gateway by SN (e.g. H3CT685DF998)\n  \
   provision <onu_id>   Trigger G.988 OMCI provisioning for specific ONU\n  \
   exec <sn> <command>  Dispatch execution command to sub-gateway via MQTT\n  \
   help                 Show this help message"
@@ -24,24 +25,27 @@ Commands:\n  \
 }
 
 fn setup_bridge() {
-    let eth1_path = Path::new("/sys/class/net/eth1");
-    if !eth1_path.exists() {
-        println!("[*] Physical interface eth1 not present, skipping VLAN eth1.1~eth1.16 bridge (control plane is active).");
+    let ifname_base = if Path::new("/sys/class/net/lan1").exists() {
+        "lan1"
+    } else if Path::new("/sys/class/net/eth1").exists() {
+        "eth1"
+    } else {
+        println!("[*] Neither lan1 nor eth1 present, skipping VLAN bridge (control plane is active).");
         return;
-    }
+    };
 
-    println!("[*] Configuring downstream FTTR network bridges...");
-    let _ = Command::new("ip").args(["link", "set", "eth1", "up"]).status();
+    println!("[*] Configuring downstream FTTR network bridges on {ifname_base}...");
+    let _ = Command::new("ip").args(["link", "set", ifname_base, "up"]).status();
 
     for id in 1..=16 {
-        let ifname = format!("eth1.{id}");
+        let ifname = format!("{ifname_base}.{id}");
         let _ = Command::new("ip")
-            .args(["link", "add", "link", "eth1", "name", &ifname, "type", "vlan", "id", &id.to_string()])
+            .args(["link", "add", "link", ifname_base, "name", &ifname, "type", "vlan", "id", &id.to_string()])
             .status();
         let _ = Command::new("ip").args(["link", "set", &ifname, "up"]).status();
         let _ = Command::new("ip").args(["link", "set", &ifname, "master", "br-lan"]).status();
     }
-    println!("[+] Downstream VLANs eth1.1 ~ eth1.16 configured and bridged to br-lan.");
+    println!("[+] Downstream VLANs {ifname_base}.1 ~ {ifname_base}.16 configured and bridged to br-lan.");
 }
 
 fn main() {
@@ -85,6 +89,18 @@ fn main() {
         "discover" => match ipc::send_ipc_command("DISCOVER") {
             Ok(resp) => println!("{resp}"),
             Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
+        },
+        "register" => {
+            if args.len() < 3 {
+                eprintln!("Usage: fttrctl register <sn> (e.g. H3CT685DF998)");
+                exit(1);
+            }
+            let sn = &args[2];
+            let payload = format!("REGISTER {sn}");
+            match ipc::send_ipc_command(&payload) {
+                Ok(resp) => println!("{resp}"),
+                Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
+            }
         },
         "provision" => {
             if args.len() < 3 {

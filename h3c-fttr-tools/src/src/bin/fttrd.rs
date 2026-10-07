@@ -205,6 +205,45 @@ fn start_ipc_server(
                     let _ = stream.write_all(
                         format!("{{\"status\": \"discovery_dispatched\", \"frames\": {}}}\n", frames.len()).as_bytes(),
                     );
+                } else if line.starts_with("REGISTER ") {
+                    let sn_str = line["REGISTER ".len()..].trim();
+                    if sn_str.len() >= 8 {
+                        let mut vendor = *b"H3TC";
+                        let mut sn = [0u8; 4];
+                        let prefix = &sn_str[..4];
+                        if prefix == "H3CT" || prefix == "H3TC" {
+                            vendor = *b"H3TC";
+                        } else {
+                            vendor.copy_from_slice(prefix.as_bytes());
+                        }
+                        let hex_sn = &sn_str[4..];
+                        if hex_sn.len() >= 8 {
+                            for i in 0..4 {
+                                if let Ok(b) = u8::from_str_radix(&hex_sn[i * 2..i * 2 + 2], 16) {
+                                    sn[i] = b;
+                                }
+                            }
+                        }
+                        let mut engine = pon_engine.lock().unwrap();
+                        let onu = engine.register_onu(vendor, sn);
+                        let act_frames = engine.activate_onu(onu.onu_id);
+                        let omci_frames = engine.build_omci_provisioning(onu.onu_id);
+                        drop(engine);
+
+                        for f in &act_frames {
+                            let _ = bosa::send_ploam_msg(&f.to_bytes());
+                            thread::sleep(Duration::from_millis(10));
+                        }
+
+                        let _ = stream.write_all(
+                            format!(
+                                "{{\"status\": \"registered\", \"onu_id\": {}, \"sn\": \"{}\", \"state\": \"O5Operation\", \"omci_messages\": {}}}\n",
+                                onu.onu_id, sn_str, omci_frames.len()
+                            ).as_bytes(),
+                        );
+                    } else {
+                        let _ = stream.write_all(b"{\"error\": \"invalid sn\"}\n");
+                    }
                 } else if line.starts_with("PROVISION ") {
                     if let Ok(id) = line["PROVISION ".len()..].trim().parse::<u8>() {
                         let mut engine = pon_engine.lock().unwrap();
@@ -253,15 +292,79 @@ fn main() {
     // 2. Initialize GPON Micro-OLT Protocol Engine
     let pon_engine = Arc::new(Mutex::new(PonEngine::new()));
 
-    // Broadcast initial discovery sequence
+    // Auto-register connected sub-gateway H3CT685DF998
     {
-        let engine = pon_engine.lock().unwrap();
-        let _discovery = engine.build_discovery_frames();
-        println!("[+] PON Engine initialized. Discovery broadcast activated.");
+        let mut engine = pon_engine.lock().unwrap();
+        let vendor = *b"H3TC";
+        let sn = [0x68, 0x5D, 0xF9, 0x98];
+        let onu = engine.register_onu(vendor, sn);
+        let act_frames = engine.activate_onu(onu.onu_id);
+        let _omci = engine.build_omci_provisioning(onu.onu_id);
+        drop(engine);
+
+        for f in &act_frames {
+            let _ = bosa::send_ploam_msg(&f.to_bytes());
+            thread::sleep(Duration::from_millis(10));
+        }
+        println!("[+] Sub-gateway H3CT685DF998 registered & activated as ONU-ID {} (State: O5Operation).", onu.onu_id);
     }
 
     let devices: Arc<Mutex<Vec<SubDevice>>> = Arc::new(Mutex::new(Vec::new()));
     let mqtt_client_arc: Arc<Mutex<Option<MqttClient>>> = Arc::new(Mutex::new(None));
+
+    // Background PLOAM discovery broadcast & reception thread
+    {
+        let pon_engine_ploam = pon_engine.clone();
+        thread::spawn(move || {
+            println!("[+] Started background PLOAM discovery & reception loop.");
+            let mut last_disc = Instant::now() - Duration::from_secs(5);
+            loop {
+                // Periodic discovery broadcast (every 1.5s)
+                if last_disc.elapsed() >= Duration::from_millis(1500) {
+                    let engine = pon_engine_ploam.lock().unwrap();
+                    let frames = engine.build_discovery_frames();
+                    drop(engine);
+                    for frame in &frames {
+                        let bytes = frame.to_bytes();
+                        let _ = bosa::send_ploam_msg(&bytes);
+                    }
+                    last_disc = Instant::now();
+                }
+
+                // Poll for incoming PLOAM frames
+                if let Ok(rx_data) = bosa::recv_ploam_msg() {
+                    if rx_data.len() >= 10 {
+                        let msg_id = rx_data[1];
+                        if msg_id == 0x01 || msg_id == 0x02 { // Serial_Number_ONU
+                            let mut vendor = [0u8; 4];
+                            let mut sn = [0u8; 4];
+                            vendor.copy_from_slice(&rx_data[2..6]);
+                            sn.copy_from_slice(&rx_data[6..10]);
+                            println!(
+                                "[+] PLOAM: Captured upstream ONU serial: Vendor={:?}, SN={:02X?}",
+                                String::from_utf8_lossy(&vendor),
+                                sn
+                            );
+
+                            let mut engine = pon_engine_ploam.lock().unwrap();
+                            let onu = engine.register_onu(vendor, sn);
+                            let act_frames = engine.activate_onu(onu.onu_id);
+                            let _omci = engine.build_omci_provisioning(onu.onu_id);
+                            drop(engine);
+
+                            for f in &act_frames {
+                                let _ = bosa::send_ploam_msg(&f.to_bytes());
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            println!("[+] ONU {} successfully activated in state O5Operation!", onu.onu_id);
+                        }
+                    }
+                }
+
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+    }
 
     // 3. Start IPC Server
     if let Ok(listener) = ipc::create_socket_listener() {

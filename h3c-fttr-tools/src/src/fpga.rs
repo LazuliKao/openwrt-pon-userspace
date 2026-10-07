@@ -21,7 +21,15 @@ pub fn load_bitstream(path: &Path) -> io::Result<()> {
         ));
     }
 
-    // Fast path: Trigger high-speed kernel bitstream loader via sysfs
+    // Fast path 1: Check if FPGA is already programmed and active
+    if let Ok(ts) = crate::bosa::read_fpga_reg(0x00000008) {
+        if ts != 0 && ts != 0xFFFFFFFF {
+            println!("[+] FPGA bitstream already active (timestamp: 0x{:08X}), skipping reload.", ts);
+            return Ok(());
+        }
+    }
+
+    // Fast path 2: Trigger high-speed kernel bitstream loader via sysfs
     if Path::new(SYSFS_RELOAD_PATH).exists() {
         println!("[+] Found active h3c-fmcs driver, triggering high-speed kernel reload...");
         let mut f = OpenOptions::new().write(true).open(SYSFS_RELOAD_PATH)?;
