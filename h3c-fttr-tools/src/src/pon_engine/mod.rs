@@ -125,7 +125,7 @@ impl PonEngine {
         }
     }
 
-    fn next_tx_id(&mut self) -> u16 {
+    pub fn next_tx_id(&mut self) -> u16 {
         let id = self.omci_tx_id;
         self.omci_tx_id = self.omci_tx_id.wrapping_add(1);
         if self.omci_tx_id == 0 {
