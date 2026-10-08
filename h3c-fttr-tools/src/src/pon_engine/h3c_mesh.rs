@@ -81,28 +81,21 @@ impl H3cMeshCoordinator {
 
         SubdevTelemetry {
             wifi_mesh: WifiMeshStatus {
-                channel_2g: 6,
-                channel_5g: 44,
-                bandwidth_5g: "160MHz".to_string(),
-                tx_power_pct: 100,
+                channel_2g: 0,
+                channel_5g: 0,
+                bandwidth_5g: "-".to_string(),
+                tx_power_pct: 0,
             },
             data_path: DataPathStatus {
                 interface,
-                gem_ports: vec![256 + (onu_id as u16), 257 + (onu_id as u16)],
-                vlan_id: onu_id as u16,
-                tx_bytes: 104_857_600,
-                rx_bytes: 419_430_400,
-                current_tx_kbps: 1250,
-                current_rx_kbps: 8420,
+                gem_ports: Vec::new(),
+                vlan_id: 0,
+                tx_bytes: 0,
+                rx_bytes: 0,
+                current_tx_kbps: 0,
+                current_rx_kbps: 0,
             },
-            connected_clients: vec![ConnectedClient {
-                mac: format!("54:E4:3A:12:{:02X}:{:02X}", onu_id, onu_id * 3),
-                ip: format!("192.168.1.{}", 100 + onu_id),
-                band: "5GHz".to_string(),
-                rssi_dbm: -52,
-                rx_rate_mbps: 1201,
-                tx_rate_mbps: 1080,
-            }],
+            connected_clients: Vec::new(),
         }
     }
 }

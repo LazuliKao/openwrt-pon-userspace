@@ -532,29 +532,7 @@ fn main() {
 
             let _ = bosa::init_optical_transceiver();
             setup_bridge();
-
-            // Auto-register connected sub-gateway H3CT685DF998
-            {
-                let mut engine = pon_engine_hw.lock().unwrap();
-                let vendor = *b"H3TC";
-                let sn = [0x68, 0x5D, 0xF9, 0x98];
-                let onu = engine.register_onu(vendor, sn);
-                let onu_id = onu.onu_id;
-                let act_frames = engine.activate_onu(onu_id);
-                let omci_frames = engine.build_omci_provisioning(onu_id);
-                drop(engine);
-
-                for f in &act_frames {
-                    let _ = bosa::send_ploam_msg(&f.to_bytes());
-                    thread::sleep(Duration::from_millis(10));
-                }
-                for f in &omci_frames {
-                    let _ = omci::send_omci_frame(onu_id, f);
-                    thread::sleep(Duration::from_millis(20));
-                }
-                let _ = bosa::set_fttr_carrier(onu_id as u32, true);
-                println!("[+] Sub-gateway H3CT685DF998 registered & activated on fttr{} (State: O5Operation).", onu_id);
-            }
+            println!("[+] Micro-OLT BOSA and bridge ready. Waiting for dynamic sub-gateways...");
         });
     }
 

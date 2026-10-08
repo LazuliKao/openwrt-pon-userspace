@@ -59,13 +59,13 @@ impl GponOnu {
             state: OnuState::O1Initial,
             eq_delay: 0,
             is_h3c_device,
-            fiber_distance_m: 18.5,
-            rx_power_dbm: -16.8,
-            tx_power_dbm: 1.9,
+            fiber_distance_m: 0.0,
+            rx_power_dbm: 0.0,
+            tx_power_dbm: 0.0,
             model,
             firmware_version,
             hardware_version,
-            uptime_seconds: 3600,
+            uptime_seconds: 0,
         }
     }
 
