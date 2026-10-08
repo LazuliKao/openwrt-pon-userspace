@@ -10,10 +10,25 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use h3c_fttr_tools::bosa;
 use h3c_fttr_tools::fpga;
+use h3c_fttr_tools::h3c_subdev;
 use h3c_fttr_tools::ipc::{self, SubDevice};
 use h3c_fttr_tools::mqtt::MqttClient;
 use h3c_fttr_tools::pon_engine::omci;
 use h3c_fttr_tools::pon_engine::PonEngine;
+
+fn dispatch_subdev_cmd(
+    client_opt: &mut Option<MqttClient>,
+    sn: &str,
+    cmd: &str,
+) -> Result<&'static str, &'static str> {
+    if let Some(ref mut client) = client_opt {
+        let topic = h3c_subdev::topic_subdev_exec(sn);
+        let _ = client.publish(&topic, cmd.as_bytes());
+        Ok("dispatched")
+    } else {
+        Err("mqtt broker unavailable")
+    }
+}
 
 fn setup_bridge() {
     println!("[*] Initializing downstream FTTR DSA switch ports (fttr1 ~ fttr16)...");
@@ -321,6 +336,197 @@ fn start_ipc_server(
                         }
                     } else {
                         let _ = stream.write_all(b"{\"error\": \"invalid format\"}\n");
+                    }
+                } else if line.starts_with("SUBDEV ") {
+                    let subdev_line = line["SUBDEV ".len()..].trim();
+                    let tokens: Vec<&str> = subdev_line.split_whitespace().collect();
+                    if tokens.len() < 2 {
+                        let _ = stream.write_all(b"{\"error\": \"usage: SUBDEV <sn> <action> [args...]\"}\n");
+                    } else {
+                        let sn = tokens[0];
+                        let action = tokens[1];
+                        let mut client_lock = mqtt_tx.lock().unwrap();
+
+                        let res = match action {
+                            "passwd" => {
+                                if tokens.len() >= 3 {
+                                    let pwd = &subdev_line[sn.len()..].trim()[action.len()..].trim();
+                                    let cmd = h3c_subdev::cmd_set_admin_password(pwd);
+                                    dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                } else {
+                                    Err("missing password argument")
+                                }
+                            }
+                            "user-passwd" => {
+                                if tokens.len() >= 3 {
+                                    let pwd = &subdev_line[sn.len()..].trim()[action.len()..].trim();
+                                    let cmd = h3c_subdev::cmd_set_user_password(pwd);
+                                    dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                } else {
+                                    Err("missing password argument")
+                                }
+                            }
+                            "admin" => {
+                                if tokens.len() >= 3 {
+                                    match tokens[2] {
+                                        "enable" => {
+                                            let cmd = h3c_subdev::cmd_enable_admin();
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        "disable" => {
+                                            let cmd = h3c_subdev::cmd_disable_admin();
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        "unlock" => {
+                                            let cmd = h3c_subdev::cmd_unlock_admin();
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        _ => Err("invalid admin action (enable/disable/unlock)"),
+                                    }
+                                } else {
+                                    Err("missing admin sub-action")
+                                }
+                            }
+                            "telnet" => {
+                                if tokens.len() >= 3 {
+                                    match tokens[2] {
+                                        "enable" => {
+                                            let port = tokens.get(3).and_then(|p| p.parse::<u16>().ok()).unwrap_or(23);
+                                            let cmd = h3c_subdev::cmd_enable_telnet(port);
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        "disable" => {
+                                            let cmd = h3c_subdev::cmd_disable_telnet();
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        _ => Err("invalid telnet action (enable/disable)"),
+                                    }
+                                } else {
+                                    Err("missing telnet sub-action")
+                                }
+                            }
+                            "tr069" => {
+                                if tokens.len() >= 3 {
+                                    match tokens[2] {
+                                        "disable" => {
+                                            let cmd = h3c_subdev::cmd_disable_tr069();
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        "set" => {
+                                            if tokens.len() >= 4 {
+                                                let acs_url = tokens[3];
+                                                let vlan = tokens.get(4).and_then(|v| v.parse::<u16>().ok());
+                                                let cmd = h3c_subdev::cmd_set_tr069(acs_url, vlan, true);
+                                                dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                            } else {
+                                                Err("missing acs url")
+                                            }
+                                        }
+                                        _ => Err("invalid tr069 action (set/disable)"),
+                                    }
+                                } else {
+                                    Err("missing tr069 sub-action")
+                                }
+                            }
+                            "iptv" => {
+                                if tokens.len() >= 3 {
+                                    match tokens[2] {
+                                        "enable" => {
+                                            let vlan = tokens.get(3).and_then(|v| v.parse::<u16>().ok()).unwrap_or(43);
+                                            let eth_port = tokens.get(4).and_then(|p| p.parse::<u8>().ok()).unwrap_or(2);
+                                            let mvlan = tokens.get(5).and_then(|m| m.parse::<u16>().ok());
+                                            let cmd = h3c_subdev::cmd_set_iptv(true, vlan, eth_port, mvlan);
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        "disable" => {
+                                            let cmd = h3c_subdev::cmd_set_iptv(false, 0, 2, None);
+                                            dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                        }
+                                        _ => Err("invalid iptv action (enable/disable)"),
+                                    }
+                                } else {
+                                    Err("missing iptv sub-action")
+                                }
+                            }
+                            "internet-vlan" => {
+                                if tokens.len() >= 3 {
+                                    if let Ok(vlan) = tokens[2].parse::<u16>() {
+                                        let mut lan_ports: Vec<u8> = tokens[3..]
+                                            .iter()
+                                            .filter_map(|p| p.parse::<u8>().ok())
+                                            .collect();
+                                        if lan_ports.is_empty() {
+                                            lan_ports = vec![1, 2, 3, 4];
+                                        }
+                                        let cmd = h3c_subdev::cmd_set_internet_vlan(vlan, &lan_ports);
+                                        dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                    } else {
+                                        Err("invalid vlan id")
+                                    }
+                                } else {
+                                    Err("missing vlan id")
+                                }
+                            }
+                            "wifi" => {
+                                if tokens.len() >= 4 {
+                                    let ssid = tokens[2];
+                                    let pwd = tokens[3];
+                                    let enable_5g = tokens
+                                        .get(4)
+                                        .map(|&v| v != "no" && v != "false" && v != "0")
+                                        .unwrap_or(true);
+                                    let cmd = h3c_subdev::cmd_set_wifi_local(ssid, pwd, enable_5g);
+                                    dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                                } else {
+                                    Err("usage: SUBDEV <sn> wifi <ssid> <password> [enable_5g]")
+                                }
+                            }
+                            "mesh" => {
+                                if tokens.len() >= 4 {
+                                    let ssid = tokens[2];
+                                    let pwd = tokens[3];
+                                    let ch2 = tokens.get(4).and_then(|c| c.parse::<u8>().ok()).unwrap_or(6);
+                                    let ch5 = tokens.get(5).and_then(|c| c.parse::<u8>().ok()).unwrap_or(44);
+                                    let bw5 = tokens.get(6).copied().unwrap_or("160MHz");
+                                    let roaming = tokens
+                                        .get(7)
+                                        .map(|&r| r != "false" && r != "0" && r != "no")
+                                        .unwrap_or(true);
+                                    let json = h3c_subdev::build_wifi_mesh_json(ssid, pwd, ch2, ch5, bw5, roaming);
+                                    let topic = h3c_subdev::topic_subdev_config(sn);
+                                    if let Some(ref mut client) = *client_lock {
+                                        let _ = client.publish(&topic, json.as_bytes());
+                                        Ok("dispatched")
+                                    } else {
+                                        Err("mqtt broker unavailable")
+                                    }
+                                } else {
+                                    Err("usage: SUBDEV <sn> mesh <ssid> <password> [ch2] [ch5] [bw5] [roaming]")
+                                }
+                            }
+                            "reboot" => {
+                                let cmd = h3c_subdev::cmd_reboot();
+                                dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                            }
+                            "factory-reset" => {
+                                let cmd = h3c_subdev::cmd_factory_reset();
+                                dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                            }
+                            "status" => {
+                                let cmd = h3c_subdev::cmd_query_status();
+                                dispatch_subdev_cmd(&mut client_lock, sn, &cmd)
+                            }
+                            _ => Err("unknown subdev action"),
+                        };
+
+                        let resp = match res {
+                            Ok(status) => format!(
+                                "{{\"status\": \"{}\", \"sn\": \"{}\", \"action\": \"{}\"}}\n",
+                                status, sn, action
+                            ),
+                            Err(e) => format!("{{\"error\": \"{}\"}}\n", e),
+                        };
+                        let _ = stream.write_all(resp.as_bytes());
                     }
                 }
             }
