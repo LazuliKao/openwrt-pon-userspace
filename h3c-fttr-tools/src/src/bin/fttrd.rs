@@ -359,8 +359,8 @@ fn main() {
             println!("[+] Started background PLOAM discovery & reception loop.");
             let mut last_disc = Instant::now() - Duration::from_secs(5);
             loop {
-                // Periodic discovery broadcast (every 1.5s)
-                if last_disc.elapsed() >= Duration::from_millis(1500) {
+                // Periodic discovery broadcast (every 3.0s)
+                if last_disc.elapsed() >= Duration::from_millis(3000) {
                     let engine = pon_engine_ploam.lock().unwrap();
                     let frames = engine.build_discovery_frames();
                     drop(engine);
@@ -405,7 +405,7 @@ fn main() {
                     }
                 }
 
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(200));
             }
         });
     }

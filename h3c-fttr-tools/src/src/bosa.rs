@@ -243,7 +243,20 @@ pub struct OpticalTransceiverStatus {
     pub cdr_locked: bool,
 }
 
+use std::sync::Mutex;
+use std::time::Instant;
+
+static OPTICAL_CACHE: Mutex<Option<(Instant, OpticalTransceiverStatus)>> = Mutex::new(None);
+
 pub fn get_optical_status() -> OpticalTransceiverStatus {
+    if let Ok(guard) = OPTICAL_CACHE.lock() {
+        if let Some((ts, ref status)) = *guard {
+            if ts.elapsed() < Duration::from_secs(2) {
+                return status.clone();
+            }
+        }
+    }
+
     let mut cdr_locked = false;
     if let Ok(val) = read_fpga_reg(0x20) {
         cdr_locked = val == 0x17258 || (val & 0x1) != 0;
@@ -266,7 +279,7 @@ pub fn get_optical_status() -> OpticalTransceiverStatus {
         }
     }
 
-    OpticalTransceiverStatus {
+    let status = OpticalTransceiverStatus {
         model: "UX3326".to_string(),
         wavelength_tx_nm: 1490,
         wavelength_rx_nm: 1310,
@@ -277,7 +290,13 @@ pub fn get_optical_status() -> OpticalTransceiverStatus {
         temperature_celsius: (temp * 10.0).round() / 10.0,
         vcc_voltage: vcc,
         cdr_locked,
+    };
+
+    if let Ok(mut guard) = OPTICAL_CACHE.lock() {
+        *guard = Some((Instant::now(), status.clone()));
     }
+
+    status
 }
 
 #[repr(C)]
