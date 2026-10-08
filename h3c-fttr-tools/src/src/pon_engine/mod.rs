@@ -118,7 +118,7 @@ impl PonEngine {
             self.h3c_coordinator.sync_wifi_mesh(onu, mqtt);
         } else {
             println!(
-                "[*] Generic GPON ONU (Vendor: {}) activated as standard bridge port eth1.{}",
+                "[*] Generic GPON ONU (Vendor: {}) activated as standard bridge port fttr{}",
                 onu.vendor_str(),
                 onu.onu_id
             );

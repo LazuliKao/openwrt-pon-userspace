@@ -21,13 +21,14 @@ start_service() {
 		/usr/sbin/fttrctl load-fpga /lib/firmware/FTTR_TOP.sbit 2>/dev/null || true
 	fi
 
-	# 2. Setup interfaces
-	if [ -d /sys/class/net/eth1 ]; then
-		ip link set eth1 up 2>/dev/null
-		ip link add link eth1 name eth1.1 type vlan id 1 2>/dev/null
-		ip link set eth1.1 up 2>/dev/null
-		ip link set eth1.1 master br-lan 2>/dev/null || brctl addif br-lan eth1.1 2>/dev/null
-	fi
+	# 2. Setup downstream DSA switch ports (fttr1 ~ fttr16)
+	for i in $(seq 1 16); do
+		dev="fttr${i}"
+		if [ -d "/sys/class/net/${dev}" ]; then
+			ip link set "$dev" up 2>/dev/null
+			ip link set "$dev" master br-lan 2>/dev/null || brctl addif br-lan "$dev" 2>/dev/null
+		fi
+	done
 
 	# 3. Start Controller Daemon
 	procd_open_instance

@@ -14,8 +14,8 @@ fn print_usage() {
 Commands:\n  \
   load-fpga [path]     Program FPGA bitstream (default: /lib/firmware/FTTR_TOP.sbit)\n  \
   bosa-init            Initialize BOSA optical transceiver registers\n  \
-  bridge-setup         Ensure downstream FTTR VLANs (lan1/eth1.1~16) are bridged to br-lan\n  \
-  status               Display active FTTR optical link and downlinked sub-gateways\n  \
+  bridge-setup         Ensure downstream FTTR switch ports (fttr1~16) are bridged to br-lan\n  \
+  status [--json|-j]   Display active FTTR optical link and DSA switch ports (table or JSON)\n  \
   discover             Trigger PLOAM discovery sequence on optical link\n  \
   register <sn>        Register and activate sub-gateway by SN (e.g. H3CT685DF998)\n  \
   auth [onu_id]        Send OMCI LOID authentication success to sub-gateway (default: 1)\n  \
@@ -27,27 +27,148 @@ Commands:\n  \
 }
 
 fn setup_bridge() {
-    let ifname_base = if Path::new("/sys/class/net/lan1").exists() {
-        "lan1"
-    } else if Path::new("/sys/class/net/eth1").exists() {
-        "eth1"
-    } else {
-        println!("[*] Neither lan1 nor eth1 present, skipping VLAN bridge (control plane is active).");
-        return;
-    };
-
-    println!("[*] Configuring downstream FTTR network bridges on {ifname_base}...");
-    let _ = Command::new("ip").args(["link", "set", ifname_base, "up"]).status();
-
+    println!("[*] Configuring downstream FTTR DSA switch ports (fttr1 ~ fttr16) to br-lan...");
     for id in 1..=16 {
-        let ifname = format!("{ifname_base}.{id}");
-        let _ = Command::new("ip")
-            .args(["link", "add", "link", ifname_base, "name", &ifname, "type", "vlan", "id", &id.to_string()])
-            .status();
+        let ifname = format!("fttr{id}");
         let _ = Command::new("ip").args(["link", "set", &ifname, "up"]).status();
         let _ = Command::new("ip").args(["link", "set", &ifname, "master", "br-lan"]).status();
     }
-    println!("[+] Downstream VLANs {ifname_base}.1 ~ {ifname_base}.16 configured and bridged to br-lan.");
+    println!("[+] Downstream switch ports fttr1 ~ fttr16 configured and bridged to br-lan.");
+}
+
+fn get_field<'a>(src: &'a str, key: &str) -> Option<&'a str> {
+    let key_pat = format!("\"{}\":", key);
+    let start = src.find(&key_pat)?;
+    let val_part = src[start + key_pat.len()..].trim_start();
+    if val_part.starts_with('"') {
+        let after = &val_part[1..];
+        let end = after.find('"')?;
+        Some(&after[..end])
+    } else {
+        let end = val_part.find(|c| c == ',' || c == '\n' || c == '}' || c == ']')?;
+        Some(val_part[..end].trim())
+    }
+}
+
+fn print_status_table(json: &str) {
+    println!("==========================================================================================");
+    println!("                   H3C HM2004-DU FTTR Micro-OLT Subsystem Status                         ");
+    println!("==========================================================================================");
+
+    // 1. Optical Link
+    let model = get_field(json, "model").unwrap_or("UX3326");
+    let tx_wl = get_field(json, "wavelength_tx_nm").unwrap_or("1490");
+    let rx_wl = get_field(json, "wavelength_rx_nm").unwrap_or("1310");
+    let tx_pwr = get_field(json, "tx_power_dbm").unwrap_or("0.00");
+    let bias = get_field(json, "laser_bias_current_ma").unwrap_or("0.0");
+    let temp = get_field(json, "temperature_celsius").unwrap_or("0.0");
+    let vcc = get_field(json, "vcc_voltage").unwrap_or("0.00");
+    let cdr = get_field(json, "cdr_locked").unwrap_or("false");
+    let cdr_str = if cdr == "true" { "LOCKED (OK)" } else { "UNLOCKED" };
+
+    println!("[*] Optical Transceiver (BOSA {}):", model);
+    println!("    Wavelength: TX {}nm / RX {}nm  |  Rate: 2.488G / 1.244G  |  CDR: {}", tx_wl, rx_wl, cdr_str);
+    println!("    TX Power:   +{} dBm  |  Bias: {} mA  |  Temp: {} °C  |  VCC: {} V", tx_pwr, bias, temp, vcc);
+    println!();
+
+    // 2. Switch Ports Table
+    println!("------------------------------------------------------------------------------------------");
+    println!(" Downstream DSA Switch Ports (fttr1 ~ fttr16)");
+    println!("------------------------------------------------------------------------------------------");
+    println!(" {:<6} {:<10} {:<10} {:<12} {:<8} {:<16} {:<12}",
+             "Port", "Interface", "Carrier", "Link Speed", "ONU-ID", "ONU Serial", "Link State");
+    println!("------------------------------------------------------------------------------------------");
+
+    let mut active_count = 0;
+    if let Some(ports_start) = json.find("\"switch_ports\": [") {
+        let rem = &json[ports_start..];
+        if let Some(ports_end) = rem.find(']') {
+            let ports_block = &rem[..ports_end];
+            for line in ports_block.lines() {
+                if !line.contains("\"port\":") {
+                    continue;
+                }
+                let port = get_field(line, "port").unwrap_or("?");
+                let ifname = get_field(line, "interface").unwrap_or("?");
+                let carrier = get_field(line, "carrier").unwrap_or("false");
+                let is_up = carrier == "true";
+                let status = if is_up { "UP" } else { "DOWN" };
+                let speed = if is_up { "2.5 Gbps" } else { "-" };
+                let onu_id = if is_up { get_field(line, "onu_id").unwrap_or("-") } else { "-" };
+                let onu_sn = if is_up { get_field(line, "onu_sn").unwrap_or("-") } else { "-" };
+                let link_state = if is_up { "O5Operation" } else { "Offline" };
+
+                if is_up {
+                    active_count += 1;
+                }
+
+                println!(" {:<6} {:<10} {:<10} {:<12} {:<8} {:<16} {:<12}",
+                         port, ifname, status, speed, onu_id, onu_sn, link_state);
+            }
+        }
+    }
+    println!("------------------------------------------------------------------------------------------");
+    println!(" Active Downlink Ports: {} / 16", active_count);
+    println!();
+
+    // 3. Sub-Gateways Details (if any)
+    if let Some(sg_start) = json.find("\"sub_gateways\": [") {
+        let rem = &json[sg_start..];
+        if let Some(sg_end) = rem.find("  \"telemetry_gateways\":") {
+            let sg_block = &rem[..sg_end];
+            if sg_block.contains("\"onu_id\":") {
+                println!("------------------------------------------------------------------------------------------");
+                println!(" Active Sub-Gateway Telemetry & Mesh Details");
+                println!("------------------------------------------------------------------------------------------");
+                for block in sg_block.split("    {") {
+                    if !block.contains("\"onu_id\":") {
+                        continue;
+                    }
+                    let onu_id = get_field(block, "onu_id").unwrap_or("?");
+                    let vendor = get_field(block, "vendor").unwrap_or("H3C");
+                    let model = get_field(block, "model").unwrap_or("HL202-DU");
+                    let sn = get_field(block, "serial_number").unwrap_or("?");
+                    let state = get_field(block, "state").unwrap_or("O5Operation");
+                    let dist = get_field(block, "fiber_distance_m").unwrap_or("0.0");
+                    let rx_pwr = get_field(block, "optical_rx_power_dbm").unwrap_or("0.0");
+                    let tx_pwr = get_field(block, "optical_tx_power_dbm").unwrap_or("0.0");
+                    let ch2 = get_field(block, "channel_2g").unwrap_or("6");
+                    let ch5 = get_field(block, "channel_5g").unwrap_or("44");
+                    let bw5 = get_field(block, "bandwidth_5g").unwrap_or("160MHz");
+
+                    println!("[+] Sub-Gateway #{} [{}] - {} {}", onu_id, sn, vendor, model);
+                    println!("    Switch Port:    fttr{} (VLAN Tag: {}, State: {})", onu_id, onu_id, state);
+                    println!("    Fiber Distance: {} m | Optical RX: {} dBm | Optical TX: {} dBm", dist, rx_pwr, tx_pwr);
+                    println!("    Wi-Fi Mesh:     2.4G Ch {} / 5G Ch {} ({})", ch2, ch5, bw5);
+
+                    if block.contains("\"connected_clients\": [") {
+                        println!("    Connected Mesh Clients:");
+                        if let Some(c_start) = block.find("\"connected_clients\": [") {
+                            let c_rem = &block[c_start..];
+                            if let Some(c_end) = c_rem.find(']') {
+                                let c_block = &c_rem[..c_end];
+                                for cline in c_block.split('{') {
+                                    if !cline.contains("\"mac\":") {
+                                        continue;
+                                    }
+                                    let mac = get_field(cline, "mac").unwrap_or("?");
+                                    let ip = get_field(cline, "ip").unwrap_or("?");
+                                    let band = get_field(cline, "band").unwrap_or("5GHz");
+                                    let rssi = get_field(cline, "rssi_dbm").unwrap_or("-50");
+                                    let rx_rate = get_field(cline, "rx_rate_mbps").unwrap_or("0");
+                                    let tx_rate = get_field(cline, "tx_rate_mbps").unwrap_or("0");
+                                    println!("      - {} | {} | {} ({} dBm) | {}/{} Mbps",
+                                             mac, ip, band, rssi, rx_rate, tx_rate);
+                                }
+                            }
+                        }
+                    }
+                    println!();
+                }
+            }
+        }
+    }
+    println!("==========================================================================================");
 }
 
 fn main() {
@@ -78,16 +199,34 @@ fn main() {
         "bridge-setup" => {
             setup_bridge();
         }
-        "status" => match ipc::send_ipc_command("STATUS") {
-            Ok(resp) => println!("{resp}"),
-            Err(_) => {
-                if let Ok(content) = fs::read_to_string(ipc::STATUS_FILE) {
-                    println!("{content}");
-                } else {
-                    println!("[-] fttrd daemon is not running and no status file found.");
+        "status" => {
+            let is_json = args.iter().any(|a| a == "--json" || a == "-j");
+            match ipc::send_ipc_command("STATUS") {
+                Ok(resp) => {
+                    if is_json {
+                        println!("{resp}");
+                    } else {
+                        print_status_table(&resp);
+                    }
+                }
+                Err(_) => {
+                    if let Ok(content) = fs::read_to_string(ipc::STATUS_FILE) {
+                        if is_json {
+                            println!("{content}");
+                        } else {
+                            println!("[-] fttrd daemon is offline. Stored telemetry cache:");
+                            print_status_table(&content);
+                        }
+                    } else {
+                        if is_json {
+                            println!("{{\"error\": \"fttrd daemon is not running\"}}");
+                        } else {
+                            println!("[-] fttrd daemon is not running and no status file found.");
+                        }
+                    }
                 }
             }
-        },
+        }
         "discover" => match ipc::send_ipc_command("DISCOVER") {
             Ok(resp) => println!("{resp}"),
             Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
@@ -103,7 +242,7 @@ fn main() {
                 Ok(resp) => println!("{resp}"),
                 Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
             }
-        },
+        }
         "auth" => {
             let id = args.get(2).map(|s| s.as_str()).unwrap_or("1");
             let payload = format!("AUTH {id}");
@@ -111,13 +250,13 @@ fn main() {
                 Ok(resp) => println!("{resp}"),
                 Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
             }
-        },
+        }
         "sync-wifi" => {
             match ipc::send_ipc_command("SYNC_WIFI") {
                 Ok(resp) => println!("{resp}"),
                 Err(e) => eprintln!("[-] Failed to communicate with fttrd: {e}"),
             }
-        },
+        }
         "provision" => {
             if args.len() < 3 {
                 eprintln!("Usage: fttrctl provision <onu_id>");

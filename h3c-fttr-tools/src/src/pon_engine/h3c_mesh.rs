@@ -27,14 +27,10 @@ impl H3cMeshCoordinator {
         }
     }
 
-    /// Sets up low-latency bridge forwarding priority for an H3C sub-gateway's VLAN interface
-    /// (Matches stock rcS_molt_boot.sh line 30: "brctl setportprio br0 eth1.x 50")
+    /// Sets up low-latency bridge forwarding priority for an H3C sub-gateway's switch interface
+    /// (Matches stock priority tuning on switch port for low-latency roaming)
     pub fn optimize_bridge_port(&self, onu_id: u8) {
-        let ifname = if std::path::Path::new("/sys/class/net/lan1").exists() {
-            format!("lan1.{}", onu_id)
-        } else {
-            format!("eth1.{}", onu_id)
-        };
+        let ifname = format!("fttr{}", onu_id);
         if std::path::Path::new(&format!("/sys/class/net/{ifname}")).exists() {
             println!("[*] Optimizing OpenWrt bridge latency for H3C sub-gateway on {ifname}...");
             let _ = Command::new("bridge")
@@ -76,11 +72,7 @@ impl H3cMeshCoordinator {
 
     /// Retrieves live telemetry data for an H3C sub-gateway
     pub fn get_subdev_telemetry(&self, _sn_str: &str, onu_id: u8) -> SubdevTelemetry {
-        let ifname = if std::path::Path::new("/sys/class/net/lan1").exists() {
-            format!("lan1.{}", onu_id)
-        } else {
-            format!("eth1.{}", onu_id)
-        };
+        let ifname = format!("fttr{}", onu_id);
         let interface = if std::path::Path::new(&format!("/sys/class/net/{ifname}")).exists() {
             ifname
         } else {

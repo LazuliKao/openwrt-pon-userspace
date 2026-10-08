@@ -361,3 +361,37 @@ pub fn recv_ploam_msg() -> io::Result<Vec<u8>> {
     }
 }
 
+#[repr(C)]
+pub struct CarrierReq {
+    pub port: u32,
+    pub carrier: u32,
+}
+
+const IOC_SET_CARRIER: u64 = 0x4008A507;
+
+pub fn set_fttr_carrier(port: u32, carrier: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(FMCS_MCI_DEV)?;
+
+        let mut req = CarrierReq {
+            port,
+            carrier: if carrier { 1 } else { 0 },
+        };
+
+        let ret = unsafe { ioctl(file.as_raw_fd(), IOC_SET_CARRIER, &mut req as *mut _) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (port, carrier);
+        Ok(())
+    }
+}
+

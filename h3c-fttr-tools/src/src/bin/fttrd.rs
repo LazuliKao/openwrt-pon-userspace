@@ -16,26 +16,13 @@ use h3c_fttr_tools::pon_engine::omci;
 use h3c_fttr_tools::pon_engine::PonEngine;
 
 fn setup_bridge() {
-    let ifname_base = if Path::new("/sys/class/net/lan1").exists() {
-        "lan1"
-    } else if Path::new("/sys/class/net/eth1").exists() {
-        "eth1"
-    } else {
-        println!("[*] Neither lan1 nor eth1 present, skipping VLAN bridge (control plane is active).");
-        return;
-    };
-
-    println!("[*] Initializing downstream FTTR network bridges on {ifname_base}...");
-    let _ = Command::new("ip").args(["link", "set", ifname_base, "up"]).status();
-
+    println!("[*] Initializing downstream FTTR DSA switch ports (fttr1 ~ fttr16)...");
     for id in 1..=16 {
-        let ifname = format!("{ifname_base}.{id}");
-        let _ = Command::new("ip")
-            .args(["link", "add", "link", ifname_base, "name", &ifname, "type", "vlan", "id", &id.to_string()])
-            .status();
+        let ifname = format!("fttr{id}");
         let _ = Command::new("ip").args(["link", "set", &ifname, "up"]).status();
         let _ = Command::new("ip").args(["link", "set", &ifname, "master", "br-lan"]).status();
     }
+    println!("[+] Downstream FTTR switch ports fttr1 ~ fttr16 bridged to br-lan.");
 }
 
 fn start_ipc_server(
@@ -92,7 +79,34 @@ fn start_ipc_server(
                         opt.cdr_locked
                     ));
 
-                    // 2. Sub-gateways (connected ONUs)
+                    // 2. Downstream DSA switch ports (fttr1 ~ fttr16)
+                    resp.push_str("  \"switch_ports\": [\n");
+                    for port in 1..=16 {
+                        let ifname = format!("fttr{port}");
+                        let onu_opt = engine.active_onus.iter().find(|o| o.onu_id == port as u8);
+                        let carrier = onu_opt.is_some();
+                        let status_str = if carrier { "UP" } else { "DOWN" };
+                        let onu_sn_str = match onu_opt {
+                            Some(o) => format!("\"{}\"", o.full_sn_str()),
+                            None => "null".to_string(),
+                        };
+                        resp.push_str(&format!(
+                            "    {{\"port\": {}, \"interface\": \"{}\", \"carrier\": {}, \"status\": \"{}\", \"onu_id\": {}, \"onu_sn\": {}}}",
+                            port,
+                            ifname,
+                            carrier,
+                            status_str,
+                            if carrier { port.to_string() } else { "null".to_string() },
+                            onu_sn_str
+                        ));
+                        if port < 16 {
+                            resp.push(',');
+                        }
+                        resp.push('\n');
+                    }
+                    resp.push_str("  ],\n");
+
+                    // 3. Sub-gateways (connected ONUs)
                     resp.push_str("  \"sub_gateways\": [\n");
                     for (i, onu) in engine.active_onus.iter().enumerate() {
                         let sn_str = onu.full_sn_str();
@@ -227,8 +241,9 @@ fn start_ipc_server(
                         }
                         let mut engine = pon_engine.lock().unwrap();
                         let onu = engine.register_onu(vendor, sn);
-                        let act_frames = engine.activate_onu(onu.onu_id);
-                        let omci_frames = engine.build_omci_provisioning(onu.onu_id);
+                        let onu_id = onu.onu_id;
+                        let act_frames = engine.activate_onu(onu_id);
+                        let omci_frames = engine.build_omci_provisioning(onu_id);
                         drop(engine);
 
                         for f in &act_frames {
@@ -236,14 +251,15 @@ fn start_ipc_server(
                             thread::sleep(Duration::from_millis(10));
                         }
                         for f in &omci_frames {
-                            let _ = omci::send_omci_frame(onu.onu_id, f);
+                            let _ = omci::send_omci_frame(onu_id, f);
                             thread::sleep(Duration::from_millis(20));
                         }
+                        let _ = bosa::set_fttr_carrier(onu_id as u32, true);
 
                         let _ = stream.write_all(
                             format!(
-                                "{{\"status\": \"registered\", \"onu_id\": {}, \"sn\": \"{}\", \"state\": \"O5Operation\", \"omci_messages\": {}}}\n",
-                                onu.onu_id, sn_str, omci_frames.len()
+                                "{{\"status\": \"registered\", \"onu_id\": {}, \"port\": \"fttr{}\", \"sn\": \"{}\", \"state\": \"O5Operation\", \"omci_messages\": {}}}\n",
+                                onu_id, onu_id, sn_str, omci_frames.len()
                             ).as_bytes(),
                         );
                     } else {
@@ -334,8 +350,9 @@ fn main() {
         let vendor = *b"H3TC";
         let sn = [0x68, 0x5D, 0xF9, 0x98];
         let onu = engine.register_onu(vendor, sn);
-        let act_frames = engine.activate_onu(onu.onu_id);
-        let omci_frames = engine.build_omci_provisioning(onu.onu_id);
+        let onu_id = onu.onu_id;
+        let act_frames = engine.activate_onu(onu_id);
+        let omci_frames = engine.build_omci_provisioning(onu_id);
         drop(engine);
 
         for f in &act_frames {
@@ -343,10 +360,11 @@ fn main() {
             thread::sleep(Duration::from_millis(10));
         }
         for f in &omci_frames {
-            let _ = omci::send_omci_frame(onu.onu_id, f);
+            let _ = omci::send_omci_frame(onu_id, f);
             thread::sleep(Duration::from_millis(20));
         }
-        println!("[+] Sub-gateway H3CT685DF998 registered & activated as ONU-ID {} (State: O5Operation).", onu.onu_id);
+        let _ = bosa::set_fttr_carrier(onu_id as u32, true);
+        println!("[+] Sub-gateway H3CT685DF998 registered & activated on fttr{} (State: O5Operation).", onu_id);
     }
 
     let devices: Arc<Mutex<Vec<SubDevice>>> = Arc::new(Mutex::new(Vec::new()));
@@ -388,8 +406,9 @@ fn main() {
 
                             let mut engine = pon_engine_ploam.lock().unwrap();
                             let onu = engine.register_onu(vendor, sn);
-                            let act_frames = engine.activate_onu(onu.onu_id);
-                            let omci_frames = engine.build_omci_provisioning(onu.onu_id);
+                            let onu_id = onu.onu_id;
+                            let act_frames = engine.activate_onu(onu_id);
+                            let omci_frames = engine.build_omci_provisioning(onu_id);
                             drop(engine);
 
                             for f in &act_frames {
@@ -397,10 +416,11 @@ fn main() {
                                 thread::sleep(Duration::from_millis(10));
                             }
                             for f in &omci_frames {
-                                let _ = omci::send_omci_frame(onu.onu_id, f);
+                                let _ = omci::send_omci_frame(onu_id, f);
                                 thread::sleep(Duration::from_millis(20));
                             }
-                            println!("[+] ONU {} successfully activated in state O5Operation!", onu.onu_id);
+                            let _ = bosa::set_fttr_carrier(onu_id as u32, true);
+                            println!("[+] ONU {} successfully activated on fttr{} in state O5Operation!", onu_id, onu_id);
                         }
                     }
                 }

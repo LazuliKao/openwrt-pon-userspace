@@ -228,52 +228,41 @@ pub fn send_omci_frame(onu_id: u8, msg: &OmciMessage) -> std::io::Result<()> {
             }
         }
 
-        // 2. Also send via physical link (lan1 or eth1) with GEM tag (0x2000 | onu_id)
-        let ifname_base = if std::path::Path::new("/sys/class/net/lan1").exists() {
-            "lan1"
-        } else if std::path::Path::new("/sys/class/net/eth1").exists() {
-            "eth1"
-        } else {
-            return Ok(());
-        };
+        // 2. Also send via corresponding downstream FTTR switch port (fttr{onu_id}) if present
+        let ifname_port = format!("fttr{}", onu_id);
+        if let Ok(c_ifname) = CString::new(ifname_port) {
+            let ifindex = unsafe { if_nametoindex(c_ifname.as_ptr()) };
+            if ifindex != 0 {
+                let sock = unsafe { socket(17 /* AF_PACKET */, 3 /* SOCK_RAW */, (0x0003u16).to_be() as i32) };
+                if sock >= 0 {
+                    let mut sll: SockAddrLl = unsafe { std::mem::zeroed() };
+                    sll.sll_family = 17;
+                    sll.sll_ifindex = ifindex as i32;
+                    sll.sll_halen = 6;
+                    sll.sll_addr[..6].copy_from_slice(&[0xff; 6]);
 
-        let c_ifname = CString::new(ifname_base).unwrap();
-        let ifindex = unsafe { if_nametoindex(c_ifname.as_ptr()) };
-        if ifindex != 0 {
-            let sock = unsafe { socket(17 /* AF_PACKET */, 3 /* SOCK_RAW */, (0x0003u16).to_be() as i32) };
-            if sock >= 0 {
-                let mut sll: SockAddrLl = unsafe { std::mem::zeroed() };
-                sll.sll_family = 17;
-                sll.sll_ifindex = ifindex as i32;
-                sll.sll_halen = 6;
-                sll.sll_addr[..6].copy_from_slice(&[0xff; 6]);
+                    let mut frame = Vec::with_capacity(64);
+                    frame.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // Dest MAC: broadcast
+                    frame.extend_from_slice(&[0x1c, 0x94, 0x68, 0x5a, 0xf4, 0x28]); // Src MAC: router MAC
 
-                let mut frame = Vec::with_capacity(64);
-                frame.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff]); // Dest MAC: broadcast
-                frame.extend_from_slice(&[0x1c, 0x94, 0x68, 0x5a, 0xf4, 0x28]); // Src MAC: router MAC
-                
-                // 802.1Q Tag: TPID 0x8100, TCI = 0x2000 | (onu_id as u16)
-                let tci: u16 = 0x2000 | (onu_id as u16);
-                frame.extend_from_slice(&0x8100u16.to_be_bytes());
-                frame.extend_from_slice(&tci.to_be_bytes());
+                    // EtherType 0x88B5 (OMCI)
+                    frame.extend_from_slice(&0x88B5u16.to_be_bytes());
 
-                // EtherType 0x88B5 (OMCI)
-                frame.extend_from_slice(&0x88B5u16.to_be_bytes());
+                    // 48-byte G.988 OMCI message
+                    frame.extend_from_slice(&msg.to_bytes());
 
-                // 48-byte G.988 OMCI message
-                frame.extend_from_slice(&msg.to_bytes());
-
-                let _ = unsafe {
-                    sendto(
-                        sock,
-                        frame.as_ptr(),
-                        frame.len(),
-                        0,
-                        &sll as *const _,
-                        std::mem::size_of::<SockAddrLl>() as u32,
-                    )
-                };
-                unsafe { close(sock); }
+                    let _ = unsafe {
+                        sendto(
+                            sock,
+                            frame.as_ptr(),
+                            frame.len(),
+                            0,
+                            &sll as *const _,
+                            std::mem::size_of::<SockAddrLl>() as u32,
+                        )
+                    };
+                    unsafe { close(sock); }
+                }
             }
         }
 
