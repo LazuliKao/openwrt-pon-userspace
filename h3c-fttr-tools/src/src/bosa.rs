@@ -229,19 +229,8 @@ pub fn init_optical_transceiver() -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-pub struct OpticalTransceiverStatus {
-    pub model: String,
-    pub wavelength_tx_nm: u32,
-    pub wavelength_rx_nm: u32,
-    pub phy_rate_downlink_gbps: f32,
-    pub phy_rate_uplink_gbps: f32,
-    pub tx_power_dbm: f32,
-    pub laser_bias_current_ma: f32,
-    pub temperature_celsius: f32,
-    pub vcc_voltage: f32,
-    pub cdr_locked: bool,
-}
+pub use crate::model::OpticalTransceiverStatus;
+
 
 use std::sync::Mutex;
 use std::time::Instant;

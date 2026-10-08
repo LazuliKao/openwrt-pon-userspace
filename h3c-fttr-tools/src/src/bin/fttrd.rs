@@ -12,6 +12,10 @@ use h3c_fttr_tools::bosa;
 use h3c_fttr_tools::fpga;
 use h3c_fttr_tools::h3c_subdev;
 use h3c_fttr_tools::ipc::{self, SubDevice};
+use h3c_fttr_tools::model::{
+    DataPathStatus, FttrSystemStatus, IpcResponse, MeshClientStatus, SubGatewayStatus,
+    SwitchPortStatus, TelemetryGatewayInfo, WifiMeshStatus,
+};
 use h3c_fttr_tools::mqtt::MqttClient;
 use h3c_fttr_tools::pon_engine::omci;
 use h3c_fttr_tools::pon_engine::PonEngine;
@@ -67,164 +71,95 @@ fn start_ipc_server(
 
                     let opt = bosa::get_optical_status();
 
-                    let mut resp = String::from("{\n");
-                    // 1. Optical transceiver status
-                    resp.push_str(&format!(
-                        "  \"optical_transceiver\": {{\n\
-                           \"model\": \"{}\",\n\
-                           \"wavelength_tx_nm\": {},\n\
-                           \"wavelength_rx_nm\": {},\n\
-                           \"phy_rate_downlink_gbps\": {:.3},\n\
-                           \"phy_rate_uplink_gbps\": {:.3},\n\
-                           \"tx_power_dbm\": {:.2},\n\
-                           \"laser_bias_current_ma\": {:.1},\n\
-                           \"temperature_celsius\": {:.1},\n\
-                           \"vcc_voltage\": {:.2},\n\
-                           \"cdr_locked\": {}\n\
-                         }},\n",
-                        opt.model,
-                        opt.wavelength_tx_nm,
-                        opt.wavelength_rx_nm,
-                        opt.phy_rate_downlink_gbps,
-                        opt.phy_rate_uplink_gbps,
-                        opt.tx_power_dbm,
-                        opt.laser_bias_current_ma,
-                        opt.temperature_celsius,
-                        opt.vcc_voltage,
-                        opt.cdr_locked
-                    ));
-
-                    // 2. Downstream DSA switch ports (fttr1 ~ fttr16)
-                    resp.push_str("  \"switch_ports\": [\n");
+                    let mut switch_ports = Vec::with_capacity(16);
                     for port in 1..=16 {
                         let ifname = format!("fttr{port}");
                         let onu_opt = engine.active_onus.iter().find(|o| o.onu_id == port as u8);
                         let carrier = onu_opt.is_some();
-                        let status_str = if carrier { "UP" } else { "DOWN" };
-                        let onu_sn_str = match onu_opt {
-                            Some(o) => format!("\"{}\"", o.full_sn_str()),
-                            None => "null".to_string(),
+                        let status_str = if carrier { "UP" } else { "DOWN" }.to_string();
+                        let (onu_id, onu_sn) = match onu_opt {
+                            Some(o) => (Some(port as u8), Some(o.full_sn_str())),
+                            None => (None, None),
                         };
-                        resp.push_str(&format!(
-                            "    {{\"port\": {}, \"interface\": \"{}\", \"carrier\": {}, \"status\": \"{}\", \"onu_id\": {}, \"onu_sn\": {}}}",
-                            port,
-                            ifname,
+                        switch_ports.push(SwitchPortStatus {
+                            port: port as u8,
+                            interface: ifname,
                             carrier,
-                            status_str,
-                            if carrier { port.to_string() } else { "null".to_string() },
-                            onu_sn_str
-                        ));
-                        if port < 16 {
-                            resp.push(',');
-                        }
-                        resp.push('\n');
+                            status: status_str,
+                            onu_id,
+                            onu_sn,
+                        });
                     }
-                    resp.push_str("  ],\n");
 
-                    // 3. Sub-gateways (connected ONUs)
-                    resp.push_str("  \"sub_gateways\": [\n");
-                    for (i, onu) in engine.active_onus.iter().enumerate() {
+                    let mut sub_gateways = Vec::new();
+                    for onu in &engine.active_onus {
                         let sn_str = onu.full_sn_str();
                         let telem = engine.h3c_coordinator.get_subdev_telemetry(&sn_str, onu.onu_id);
+                        let clients = telem
+                            .connected_clients
+                            .iter()
+                            .map(|c| MeshClientStatus {
+                                mac: c.mac.clone(),
+                                ip: c.ip.clone(),
+                                band: c.band.clone(),
+                                rssi_dbm: c.rssi_dbm,
+                                rx_rate_mbps: c.rx_rate_mbps,
+                                tx_rate_mbps: c.tx_rate_mbps,
+                            })
+                            .collect();
 
-                        resp.push_str(&format!(
-                            "    {{\n\
-                               \"onu_id\": {},\n\
-                               \"vendor\": \"{}\",\n\
-                               \"model\": \"{}\",\n\
-                               \"serial_number\": \"{}\",\n\
-                               \"state\": \"{:?}\",\n\
-                               \"fiber_distance_m\": {:.1},\n\
-                               \"ranging_delay_rtd_ns\": {},\n\
-                               \"optical_rx_power_dbm\": {:.1},\n\
-                               \"optical_tx_power_dbm\": {:.1},\n\
-                               \"firmware_version\": \"{}\",\n\
-                               \"hardware_version\": \"{}\",\n\
-                               \"uptime_seconds\": {},\n\
-                               \"data_path\": {{\n\
-                                 \"interface\": \"{}\",\n\
-                                 \"gem_ports\": {:?},\n\
-                                 \"vlan_id\": {},\n\
-                                 \"tx_bytes\": {},\n\
-                                 \"rx_bytes\": {},\n\
-                                 \"current_tx_kbps\": {},\n\
-                                 \"current_rx_kbps\": {}\n\
-                               }},\n\
-                               \"wifi_mesh\": {{\n\
-                                 \"channel_2g\": {},\n\
-                                 \"channel_5g\": {},\n\
-                                 \"bandwidth_5g\": \"{}\",\n\
-                                 \"tx_power_pct\": {}\n\
-                               }},\n\
-                               \"connected_clients\": [\n",
-                            onu.onu_id,
-                            onu.vendor_str(),
-                            onu.model,
-                            sn_str,
-                            onu.state,
-                            onu.fiber_distance_m,
-                            (onu.fiber_distance_m / 0.102) as u64,
-                            onu.rx_power_dbm,
-                            onu.tx_power_dbm,
-                            onu.firmware_version,
-                            onu.hardware_version,
-                            onu.uptime_seconds,
-                            telem.data_path.interface,
-                            telem.data_path.gem_ports,
-                            telem.data_path.vlan_id,
-                            telem.data_path.tx_bytes,
-                            telem.data_path.rx_bytes,
-                            telem.data_path.current_tx_kbps,
-                            telem.data_path.current_rx_kbps,
-                            telem.wifi_mesh.channel_2g,
-                            telem.wifi_mesh.channel_5g,
-                            telem.wifi_mesh.bandwidth_5g,
-                            telem.wifi_mesh.tx_power_pct
-                        ));
+                        sub_gateways.push(SubGatewayStatus {
+                            onu_id: onu.onu_id,
+                            vendor: onu.vendor_str(),
+                            model: onu.model.clone(),
+                            serial_number: sn_str,
+                            state: format!("{:?}", onu.state),
+                            fiber_distance_m: onu.fiber_distance_m,
+                            ranging_delay_rtd_ns: (onu.fiber_distance_m / 0.102) as u32,
+                            optical_rx_power_dbm: onu.rx_power_dbm,
+                            optical_tx_power_dbm: onu.tx_power_dbm,
+                            firmware_version: onu.firmware_version.clone(),
+                            hardware_version: onu.hardware_version.clone(),
+                            uptime_seconds: onu.uptime_seconds,
+                            data_path: DataPathStatus {
+                                interface: telem.data_path.interface.clone(),
+                                gem_ports: telem.data_path.gem_ports.clone(),
+                                vlan_id: telem.data_path.vlan_id,
+                                tx_bytes: telem.data_path.tx_bytes,
+                                rx_bytes: telem.data_path.rx_bytes,
+                                current_tx_kbps: telem.data_path.current_tx_kbps,
+                                current_rx_kbps: telem.data_path.current_rx_kbps,
+                            },
+                            wifi_mesh: WifiMeshStatus {
+                                channel_2g: telem.wifi_mesh.channel_2g,
+                                channel_5g: telem.wifi_mesh.channel_5g,
+                                bandwidth_5g: telem.wifi_mesh.bandwidth_5g.clone(),
+                                tx_power_pct: telem.wifi_mesh.tx_power_pct,
+                            },
+                            connected_clients: clients,
+                        });
+                    }
 
-                        for (ci, client) in telem.connected_clients.iter().enumerate() {
-                            resp.push_str(&format!(
-                                "        {{\n\
-                                   \"mac\": \"{}\",\n\
-                                   \"ip\": \"{}\",\n\
-                                   \"band\": \"{}\",\n\
-                                   \"rssi_dbm\": {},\n\
-                                   \"rx_rate_mbps\": {},\n\
-                                   \"tx_rate_mbps\": {}\n\
-                                 }}",
-                                client.mac,
-                                client.ip,
-                                client.band,
-                                client.rssi_dbm,
-                                client.rx_rate_mbps,
-                                client.tx_rate_mbps
-                            ));
-                            if ci + 1 < telem.connected_clients.len() {
-                                resp.push(',');
-                            }
-                            resp.push('\n');
-                        }
-                        resp.push_str("      ]\n    }");
-                        if i + 1 < engine.active_onus.len() {
-                            resp.push(',');
-                        }
-                        resp.push('\n');
+                    let telemetry_gateways = devs
+                        .iter()
+                        .map(|dev| TelemetryGatewayInfo {
+                            id: dev.id.clone(),
+                            last_seen_sec_ago: now.saturating_sub(dev.last_seen),
+                            last_payload_bytes: dev.payload_bytes,
+                        })
+                        .collect();
+
+                    let sys_status = FttrSystemStatus {
+                        optical_transceiver: opt,
+                        switch_ports,
+                        sub_gateways,
+                        telemetry_gateways,
+                    };
+
+                    if let Ok(json_str) = serde_json::to_string_pretty(&sys_status) {
+                        let _ = stream.write_all(json_str.as_bytes());
+                        let _ = stream.write_all(b"\n");
                     }
-                    resp.push_str("  ],\n  \"telemetry_gateways\": [\n");
-                    for (i, dev) in devs.iter().enumerate() {
-                        resp.push_str(&format!(
-                            "    {{\"id\": \"{}\", \"last_seen_sec_ago\": {}, \"payload_bytes\": {}}}",
-                            dev.id,
-                            now.saturating_sub(dev.last_seen),
-                            dev.payload_bytes
-                        ));
-                        if i + 1 < devs.len() {
-                            resp.push(',');
-                        }
-                        resp.push('\n');
-                    }
-                    resp.push_str("  ]\n}\n");
-                    let _ = stream.write_all(resp.as_bytes());
                 } else if line == "DISCOVER" {
                     let engine = pon_engine.lock().unwrap();
                     let frames = engine.build_discovery_frames();
@@ -271,14 +206,15 @@ fn start_ipc_server(
                         }
                         let _ = bosa::set_fttr_carrier(onu_id as u32, true);
 
-                        let _ = stream.write_all(
-                            format!(
-                                "{{\"status\": \"registered\", \"onu_id\": {}, \"port\": \"fttr{}\", \"sn\": \"{}\", \"state\": \"O5Operation\", \"omci_messages\": {}}}\n",
-                                onu_id, onu_id, sn_str, omci_frames.len()
-                            ).as_bytes(),
-                        );
+                        let mut resp = IpcResponse::ok("registered");
+                        resp.onu_id = Some(onu_id);
+                        resp.port = Some(format!("fttr{}", onu_id));
+                        resp.sn = Some(sn_str.to_string());
+                        resp.state = Some("O5Operation".to_string());
+                        resp.omci_messages = Some(omci_frames.len());
+                        let _ = stream.write_all(resp.to_json_line().as_bytes());
                     } else {
-                        let _ = stream.write_all(b"{\"error\": \"invalid sn\"}\n");
+                        let _ = stream.write_all(IpcResponse::err("invalid sn").to_json_line().as_bytes());
                     }
                 } else if line.starts_with("PROVISION ") {
                     if let Ok(id) = line["PROVISION ".len()..].trim().parse::<u8>() {
@@ -289,11 +225,11 @@ fn start_ipc_server(
                             let _ = omci::send_omci_frame(id, f);
                             thread::sleep(Duration::from_millis(20));
                         }
-                        let _ = stream.write_all(
-                            format!("{{\"status\": \"provisioned\", \"omci_messages\": {}}}\n", omci_frames.len()).as_bytes(),
-                        );
+                        let mut resp = IpcResponse::ok("provisioned");
+                        resp.omci_messages = Some(omci_frames.len());
+                        let _ = stream.write_all(resp.to_json_line().as_bytes());
                     } else {
-                        let _ = stream.write_all(b"{\"error\": \"invalid onu id\"}\n");
+                        let _ = stream.write_all(IpcResponse::err("invalid onu id").to_json_line().as_bytes());
                     }
                 } else if line.starts_with("AUTH ") {
                     if let Ok(id) = line["AUTH ".len()..].trim().parse::<u8>() {
@@ -308,11 +244,11 @@ fn start_ipc_server(
                         thread::sleep(Duration::from_millis(20));
                         let _ = omci::send_omci_frame(id, &f2);
 
-                        let _ = stream.write_all(
-                            format!("{{\"status\": \"auth_sent\", \"onu_id\": {}}}\n", id).as_bytes(),
-                        );
+                        let mut resp = IpcResponse::ok("auth_sent");
+                        resp.onu_id = Some(id);
+                        let _ = stream.write_all(resp.to_json_line().as_bytes());
                     } else {
-                        let _ = stream.write_all(b"{\"error\": \"invalid onu id\"}\n");
+                        let _ = stream.write_all(IpcResponse::err("invalid onu id").to_json_line().as_bytes());
                     }
                 } else if line == "SYNC_WIFI" {
                     let engine = pon_engine.lock().unwrap();
@@ -320,7 +256,7 @@ fn start_ipc_server(
                     for onu in &engine.active_onus {
                         engine.h3c_coordinator.sync_wifi_mesh(onu, &mut *client_lock);
                     }
-                    let _ = stream.write_all(b"{\"status\": \"wifi_synced\"}\n");
+                    let _ = stream.write_all(IpcResponse::ok("wifi_synced").to_json_line().as_bytes());
                 } else if line.starts_with("EXEC ") {
                     let parts: Vec<&str> = line["EXEC ".len()..].splitn(2, ' ').collect();
                     if parts.len() == 2 {
@@ -330,18 +266,18 @@ fn start_ipc_server(
                         let mut client_lock = mqtt_tx.lock().unwrap();
                         if let Some(ref mut client) = *client_lock {
                             let _ = client.publish(&topic, cmd.as_bytes());
-                            let _ = stream.write_all(b"{\"status\": \"dispatched\"}\n");
+                            let _ = stream.write_all(IpcResponse::ok("dispatched").to_json_line().as_bytes());
                         } else {
-                            let _ = stream.write_all(b"{\"error\": \"mqtt broker unavailable\"}\n");
+                            let _ = stream.write_all(IpcResponse::err("mqtt broker unavailable").to_json_line().as_bytes());
                         }
                     } else {
-                        let _ = stream.write_all(b"{\"error\": \"invalid format\"}\n");
+                        let _ = stream.write_all(IpcResponse::err("invalid format").to_json_line().as_bytes());
                     }
                 } else if line.starts_with("SUBDEV ") {
                     let subdev_line = line["SUBDEV ".len()..].trim();
                     let tokens: Vec<&str> = subdev_line.split_whitespace().collect();
                     if tokens.len() < 2 {
-                        let _ = stream.write_all(b"{\"error\": \"usage: SUBDEV <sn> <action> [args...]\"}\n");
+                        let _ = stream.write_all(IpcResponse::err("usage: SUBDEV <sn> <action> [args...]").to_json_line().as_bytes());
                     } else {
                         let sn = tokens[0];
                         let action = tokens[1];
@@ -520,13 +456,10 @@ fn start_ipc_server(
                         };
 
                         let resp = match res {
-                            Ok(status) => format!(
-                                "{{\"status\": \"{}\", \"sn\": \"{}\", \"action\": \"{}\"}}\n",
-                                status, sn, action
-                            ),
-                            Err(e) => format!("{{\"error\": \"{}\"}}\n", e),
+                            Ok(status) => IpcResponse::subdev(status, sn, action),
+                            Err(e) => IpcResponse::err(e),
                         };
-                        let _ = stream.write_all(resp.as_bytes());
+                        let _ = stream.write_all(resp.to_json_line().as_bytes());
                     }
                 }
             }

@@ -8,6 +8,8 @@ repository = "https://github.com/pbs05/openwrt-pon-userspace"
 
 [dependencies]
 mqttrs2 = "0.1.0"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 
 [[bin]]
 name = "fttrctl"

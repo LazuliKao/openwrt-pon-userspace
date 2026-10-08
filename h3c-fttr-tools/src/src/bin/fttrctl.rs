@@ -7,6 +7,7 @@ use std::process::{exit, Command};
 use h3c_fttr_tools::bosa;
 use h3c_fttr_tools::fpga;
 use h3c_fttr_tools::ipc;
+use h3c_fttr_tools::model::{FttrSystemStatus, IpcResponse};
 
 fn print_usage() {
     eprintln!(
@@ -99,12 +100,18 @@ fn handle_subdev_command(args: &[String]) {
             if is_json {
                 print!("{resp}");
             } else {
-                if resp.contains("\"error\"") {
-                    let err_msg = get_field(&resp, "error").unwrap_or("unknown error");
-                    eprintln!("[-] Error from sub-gateway daemon: {err_msg}");
-                    exit(1);
-                } else {
-                    println!("[+] Successfully dispatched action '{action}' to sub-gateway {sn} via MQTT.");
+                match serde_json::from_str::<IpcResponse>(&resp) {
+                    Ok(r) => {
+                        if let Some(err) = r.error {
+                            eprintln!("[-] Error from sub-gateway daemon: {err}");
+                            exit(1);
+                        } else {
+                            println!("[+] Successfully dispatched action '{action}' to sub-gateway {sn} via MQTT.");
+                        }
+                    }
+                    Err(_) => {
+                        println!("{resp}");
+                    }
                 }
             }
         }
@@ -130,39 +137,18 @@ fn setup_bridge() {
     println!("[+] Downstream switch ports fttr1 ~ fttr16 configured and bridged to br-lan.");
 }
 
-fn get_field<'a>(src: &'a str, key: &str) -> Option<&'a str> {
-    let key_pat = format!("\"{}\":", key);
-    let start = src.find(&key_pat)?;
-    let val_part = src[start + key_pat.len()..].trim_start();
-    if val_part.starts_with('"') {
-        let after = &val_part[1..];
-        let end = after.find('"')?;
-        Some(&after[..end])
-    } else {
-        let end = val_part.find(|c| c == ',' || c == '\n' || c == '}' || c == ']')?;
-        Some(val_part[..end].trim())
-    }
-}
-
-fn print_status_table(json: &str) {
+fn print_status_table(status: &FttrSystemStatus) {
     println!("==========================================================================================");
     println!("                   H3C HM2004-DU FTTR Micro-OLT Subsystem Status                         ");
     println!("==========================================================================================");
 
     // 1. Optical Link
-    let model = get_field(json, "model").unwrap_or("UX3326");
-    let tx_wl = get_field(json, "wavelength_tx_nm").unwrap_or("1490");
-    let rx_wl = get_field(json, "wavelength_rx_nm").unwrap_or("1310");
-    let tx_pwr = get_field(json, "tx_power_dbm").unwrap_or("0.00");
-    let bias = get_field(json, "laser_bias_current_ma").unwrap_or("0.0");
-    let temp = get_field(json, "temperature_celsius").unwrap_or("0.0");
-    let vcc = get_field(json, "vcc_voltage").unwrap_or("0.00");
-    let cdr = get_field(json, "cdr_locked").unwrap_or("false");
-    let cdr_str = if cdr == "true" { "LOCKED (OK)" } else { "UNLOCKED" };
+    let opt = &status.optical_transceiver;
+    let cdr_str = if opt.cdr_locked { "LOCKED (OK)" } else { "UNLOCKED" };
 
-    println!("[*] Optical Transceiver (BOSA {}):", model);
-    println!("    Wavelength: TX {}nm / RX {}nm  |  Rate: 2.488G / 1.244G  |  CDR: {}", tx_wl, rx_wl, cdr_str);
-    println!("    TX Power:   +{} dBm  |  Bias: {} mA  |  Temp: {} °C  |  VCC: {} V", tx_pwr, bias, temp, vcc);
+    println!("[*] Optical Transceiver (BOSA {}):", opt.model);
+    println!("    Wavelength: TX {}nm / RX {}nm  |  Rate: 2.488G / 1.244G  |  CDR: {}", opt.wavelength_tx_nm, opt.wavelength_rx_nm, cdr_str);
+    println!("    TX Power:   {:.2} dBm  |  Bias: {:.1} mA  |  Temp: {:.1} °C  |  VCC: {:.2} V", opt.tx_power_dbm, opt.laser_bias_current_ma, opt.temperature_celsius, opt.vcc_voltage);
     println!();
 
     // 2. Switch Ports Table
@@ -174,92 +160,43 @@ fn print_status_table(json: &str) {
     println!("------------------------------------------------------------------------------------------");
 
     let mut active_count = 0;
-    if let Some(ports_start) = json.find("\"switch_ports\": [") {
-        let rem = &json[ports_start..];
-        if let Some(ports_end) = rem.find(']') {
-            let ports_block = &rem[..ports_end];
-            for line in ports_block.lines() {
-                if !line.contains("\"port\":") {
-                    continue;
-                }
-                let port = get_field(line, "port").unwrap_or("?");
-                let ifname = get_field(line, "interface").unwrap_or("?");
-                let carrier = get_field(line, "carrier").unwrap_or("false");
-                let is_up = carrier == "true";
-                let status = if is_up { "UP" } else { "DOWN" };
-                let speed = if is_up { "2.5 Gbps" } else { "-" };
-                let onu_id = if is_up { get_field(line, "onu_id").unwrap_or("-") } else { "-" };
-                let onu_sn = if is_up { get_field(line, "onu_sn").unwrap_or("-") } else { "-" };
-                let link_state = if is_up { "O5Operation" } else { "Offline" };
+    for p in &status.switch_ports {
+        let is_up = p.carrier;
+        let speed = if is_up { "2.5 Gbps" } else { "-" };
+        let onu_id_str = p.onu_id.map(|id| id.to_string()).unwrap_or_else(|| "-".to_string());
+        let onu_sn_str = p.onu_sn.as_deref().unwrap_or("-");
+        let link_state = if is_up { "O5Operation" } else { "Offline" };
 
-                if is_up {
-                    active_count += 1;
-                }
-
-                println!(" {:<6} {:<10} {:<10} {:<12} {:<8} {:<16} {:<12}",
-                         port, ifname, status, speed, onu_id, onu_sn, link_state);
-            }
+        if is_up {
+            active_count += 1;
         }
+
+        println!(" {:<6} {:<10} {:<10} {:<12} {:<8} {:<16} {:<12}",
+                 p.port, p.interface, p.status, speed, onu_id_str, onu_sn_str, link_state);
     }
     println!("------------------------------------------------------------------------------------------");
     println!(" Active Downlink Ports: {} / 16", active_count);
     println!();
 
     // 3. Sub-Gateways Details (if any)
-    if let Some(sg_start) = json.find("\"sub_gateways\": [") {
-        let rem = &json[sg_start..];
-        if let Some(sg_end) = rem.find("  \"telemetry_gateways\":") {
-            let sg_block = &rem[..sg_end];
-            if sg_block.contains("\"onu_id\":") {
-                println!("------------------------------------------------------------------------------------------");
-                println!(" Active Sub-Gateway Telemetry & Mesh Details");
-                println!("------------------------------------------------------------------------------------------");
-                for block in sg_block.split("    {") {
-                    if !block.contains("\"onu_id\":") {
-                        continue;
-                    }
-                    let onu_id = get_field(block, "onu_id").unwrap_or("?");
-                    let vendor = get_field(block, "vendor").unwrap_or("H3C");
-                    let model = get_field(block, "model").unwrap_or("HL202-DU");
-                    let sn = get_field(block, "serial_number").unwrap_or("?");
-                    let state = get_field(block, "state").unwrap_or("O5Operation");
-                    let dist = get_field(block, "fiber_distance_m").unwrap_or("0.0");
-                    let rx_pwr = get_field(block, "optical_rx_power_dbm").unwrap_or("0.0");
-                    let tx_pwr = get_field(block, "optical_tx_power_dbm").unwrap_or("0.0");
-                    let ch2 = get_field(block, "channel_2g").unwrap_or("6");
-                    let ch5 = get_field(block, "channel_5g").unwrap_or("44");
-                    let bw5 = get_field(block, "bandwidth_5g").unwrap_or("160MHz");
+    if !status.sub_gateways.is_empty() {
+        println!("------------------------------------------------------------------------------------------");
+        println!(" Active Sub-Gateway Telemetry & Mesh Details");
+        println!("------------------------------------------------------------------------------------------");
+        for sg in &status.sub_gateways {
+            println!("[+] Sub-Gateway #{} [{}] - {} {}", sg.onu_id, sg.serial_number, sg.vendor, sg.model);
+            println!("    Switch Port:    fttr{} (VLAN Tag: {}, State: {})", sg.onu_id, sg.onu_id, sg.state);
+            println!("    Fiber Distance: {:.1} m | Optical RX: {:.1} dBm | Optical TX: {:.1} dBm", sg.fiber_distance_m, sg.optical_rx_power_dbm, sg.optical_tx_power_dbm);
+            println!("    Wi-Fi Mesh:     2.4G Ch {} / 5G Ch {} ({})", sg.wifi_mesh.channel_2g, sg.wifi_mesh.channel_5g, sg.wifi_mesh.bandwidth_5g);
 
-                    println!("[+] Sub-Gateway #{} [{}] - {} {}", onu_id, sn, vendor, model);
-                    println!("    Switch Port:    fttr{} (VLAN Tag: {}, State: {})", onu_id, onu_id, state);
-                    println!("    Fiber Distance: {} m | Optical RX: {} dBm | Optical TX: {} dBm", dist, rx_pwr, tx_pwr);
-                    println!("    Wi-Fi Mesh:     2.4G Ch {} / 5G Ch {} ({})", ch2, ch5, bw5);
-
-                    if block.contains("\"connected_clients\": [") {
-                        println!("    Connected Mesh Clients:");
-                        if let Some(c_start) = block.find("\"connected_clients\": [") {
-                            let c_rem = &block[c_start..];
-                            if let Some(c_end) = c_rem.find(']') {
-                                let c_block = &c_rem[..c_end];
-                                for cline in c_block.split('{') {
-                                    if !cline.contains("\"mac\":") {
-                                        continue;
-                                    }
-                                    let mac = get_field(cline, "mac").unwrap_or("?");
-                                    let ip = get_field(cline, "ip").unwrap_or("?");
-                                    let band = get_field(cline, "band").unwrap_or("5GHz");
-                                    let rssi = get_field(cline, "rssi_dbm").unwrap_or("-50");
-                                    let rx_rate = get_field(cline, "rx_rate_mbps").unwrap_or("0");
-                                    let tx_rate = get_field(cline, "tx_rate_mbps").unwrap_or("0");
-                                    println!("      - {} | {} | {} ({} dBm) | {}/{} Mbps",
-                                             mac, ip, band, rssi, rx_rate, tx_rate);
-                                }
-                            }
-                        }
-                    }
-                    println!();
+            if !sg.connected_clients.is_empty() {
+                println!("    Connected Mesh Clients:");
+                for c in &sg.connected_clients {
+                    println!("      - {} | {} | {} ({} dBm) | {}/{} Mbps",
+                             c.mac, c.ip, c.band, c.rssi_dbm, c.rx_rate_mbps, c.tx_rate_mbps);
                 }
             }
+            println!();
         }
     }
     println!("==========================================================================================");
@@ -300,7 +237,12 @@ fn main() {
                     if is_json {
                         println!("{resp}");
                     } else {
-                        print_status_table(&resp);
+                        match serde_json::from_str::<FttrSystemStatus>(&resp) {
+                            Ok(parsed) => print_status_table(&parsed),
+                            Err(e) => {
+                                eprintln!("[-] Failed to parse daemon status ({e}). Raw response:\n{resp}");
+                            }
+                        }
                     }
                 }
                 Err(_) => {
@@ -309,7 +251,10 @@ fn main() {
                             println!("{content}");
                         } else {
                             println!("[-] fttrd daemon is offline. Stored telemetry cache:");
-                            print_status_table(&content);
+                            match serde_json::from_str::<FttrSystemStatus>(&content) {
+                                Ok(parsed) => print_status_table(&parsed),
+                                Err(_) => println!("{content}"),
+                            }
                         }
                     } else {
                         if is_json {

@@ -168,6 +168,20 @@ pub fn cmd_set_wifi_local(ssid: &str, password: &str, enable_5g: bool) -> String
     parts.join("; ")
 }
 
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct WifiMeshPayload<'a> {
+    action: &'static str,
+    ssid: &'a str,
+    wpa_key: &'a str,
+    encryption: &'static str,
+    channel_2g: u8,
+    channel_5g: u8,
+    bandwidth_5g: &'a str,
+    roaming: bool,
+}
+
 /// Generates the payload for Wi-Fi Mesh EasyMesh JSON synchronization broadcast.
 pub fn build_wifi_mesh_json(
     ssid: &str,
@@ -177,22 +191,17 @@ pub fn build_wifi_mesh_json(
     bw_5g: &str,
     roaming: bool,
 ) -> String {
-    format!(
-        "{{\"action\":\"mesh_sync\",\
-          \"ssid\":\"{}\",\
-          \"wpa_key\":\"{}\",\
-          \"encryption\":\"sae-mixed\",\
-          \"channel_2g\":{},\
-          \"channel_5g\":{},\
-          \"bandwidth_5g\":\"{}\",\
-          \"roaming\":{}}}",
-        escape_json(ssid),
-        escape_json(password),
-        ch_2g,
-        ch_5g,
-        escape_json(bw_5g),
-        roaming
-    )
+    let payload = WifiMeshPayload {
+        action: "mesh_sync",
+        ssid,
+        wpa_key: password,
+        encryption: "sae-mixed",
+        channel_2g: ch_2g,
+        channel_5g: ch_5g,
+        bandwidth_5g: bw_5g,
+        roaming,
+    };
+    serde_json::to_string(&payload).unwrap_or_default()
 }
 
 /// Generates the reboot command for the sub-gateway.
@@ -229,6 +238,3 @@ fn escape_single_quotes(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
