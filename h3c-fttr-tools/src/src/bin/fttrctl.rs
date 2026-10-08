@@ -142,6 +142,16 @@ fn print_status_table(status: &FttrSystemStatus) {
     println!("                   H3C HM2004-DU FTTR Micro-OLT Subsystem Status                         ");
     println!("==========================================================================================");
 
+    // 0. FPGA Core Status
+    let fpga_badge = match status.fpga_status.as_str() {
+        "ready" => "[READY / ACTIVE]",
+        "programming" => "[PROGRAMMING / IN PROGRESS]",
+        "failed" => "[FAILED / ERROR]",
+        _ => "[UNKNOWN / NOT STARTED]",
+    };
+    println!("[*] FPGA Micro-OLT Core:    {} (Status: {})", fpga_badge, status.fpga_status);
+    println!();
+
     // 1. Optical Link
     let opt = &status.optical_transceiver;
     let cdr_str = if opt.cdr_locked { "LOCKED (OK)" } else { "UNLOCKED" };
@@ -246,6 +256,23 @@ fn main() {
                     }
                 }
                 Err(_) => {
+                    let fpga_st = fpga::get_fpga_status();
+                    if fpga_st == fpga::FpgaStatus::Programming {
+                        if is_json {
+                            println!("{{\"fpga_status\": \"programming\", \"message\": \"FPGA bitstream is currently programming in background, please wait...\"}}");
+                        } else {
+                            println!("[*] FPGA 位流正在内核后台烧录中（Micro-OLT 硬件正在初始化，约需数十秒），请稍候...");
+                        }
+                        return;
+                    } else if fpga_st == fpga::FpgaStatus::Failed {
+                        if is_json {
+                            println!("{{\"fpga_status\": \"failed\", \"error\": \"FPGA bitstream programming failed in kernel\"}}");
+                        } else {
+                            eprintln!("[!] 错误：内核 FPGA 位流烧录失败！请检查系统日志（dmesg）。");
+                        }
+                        return;
+                    }
+
                     if let Ok(content) = fs::read_to_string(ipc::STATUS_FILE) {
                         if is_json {
                             println!("{content}");

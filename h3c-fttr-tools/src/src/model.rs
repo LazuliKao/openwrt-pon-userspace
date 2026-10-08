@@ -94,10 +94,16 @@ pub struct TelemetryGatewayInfo {
 /// Aggregated system status model returned by fttrd daemon on STATUS request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FttrSystemStatus {
+    #[serde(default = "default_fpga_status")]
+    pub fpga_status: String,
     pub optical_transceiver: OpticalTransceiverStatus,
     pub switch_ports: Vec<SwitchPortStatus>,
     pub sub_gateways: Vec<SubGatewayStatus>,
     pub telemetry_gateways: Vec<TelemetryGatewayInfo>,
+}
+
+fn default_fpga_status() -> String {
+    "ready".to_string()
 }
 
 /// Generic IPC response structure for control commands.

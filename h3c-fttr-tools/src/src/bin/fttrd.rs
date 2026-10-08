@@ -149,7 +149,9 @@ fn start_ipc_server(
                         })
                         .collect();
 
+                    let fpga_status_str = fpga::get_fpga_status().to_string();
                     let sys_status = FttrSystemStatus {
+                        fpga_status: fpga_status_str,
                         optical_transceiver: opt,
                         switch_ports,
                         sub_gateways,
@@ -472,44 +474,91 @@ fn main() {
 
     let _ = fs::create_dir_all(ipc::SUBDEV_DIR);
 
-    // 1. Hardware Initialization
-    let fw_path = Path::new("/lib/firmware/FTTR_TOP.sbit");
-    if fw_path.exists() {
-        let _ = fpga::load_bitstream(fw_path);
-    }
-    let _ = bosa::init_optical_transceiver();
-    setup_bridge();
-
-    // 2. Initialize GPON Micro-OLT Protocol Engine
-    let pon_engine = Arc::new(Mutex::new(PonEngine::new()));
-
-    // Auto-register connected sub-gateway H3CT685DF998
-    {
-        let mut engine = pon_engine.lock().unwrap();
-        let vendor = *b"H3TC";
-        let sn = [0x68, 0x5D, 0xF9, 0x98];
-        let onu = engine.register_onu(vendor, sn);
-        let onu_id = onu.onu_id;
-        let act_frames = engine.activate_onu(onu_id);
-        let omci_frames = engine.build_omci_provisioning(onu_id);
-        drop(engine);
-
-        for f in &act_frames {
-            let _ = bosa::send_ploam_msg(&f.to_bytes());
-            thread::sleep(Duration::from_millis(10));
-        }
-        for f in &omci_frames {
-            let _ = omci::send_omci_frame(onu_id, f);
-            thread::sleep(Duration::from_millis(20));
-        }
-        let _ = bosa::set_fttr_carrier(onu_id as u32, true);
-        println!("[+] Sub-gateway H3CT685DF998 registered & activated on fttr{} (State: O5Operation).", onu_id);
-    }
-
+    // 1. Data Structures & IPC Socket Server (Start immediately so fttrctl can query)
     let devices: Arc<Mutex<Vec<SubDevice>>> = Arc::new(Mutex::new(Vec::new()));
+    let pon_engine = Arc::new(Mutex::new(PonEngine::new()));
     let mqtt_client_arc: Arc<Mutex<Option<MqttClient>>> = Arc::new(Mutex::new(None));
 
-    // Background PLOAM discovery broadcast & reception thread
+    if let Ok(listener) = ipc::create_socket_listener() {
+        start_ipc_server(
+            listener,
+            devices.clone(),
+            pon_engine.clone(),
+            mqtt_client_arc.clone(),
+        );
+        println!("[+] IPC socket server listening on {}", ipc::SOCKET_PATH);
+    }
+
+    // 2. Background Hardware Initialization (Async resilient)
+    {
+        let pon_engine_hw = pon_engine.clone();
+        thread::spawn(move || {
+            let fw_path = Path::new("/lib/firmware/FTTR_TOP.sbit");
+            if fw_path.exists() {
+                let _ = fpga::load_bitstream(fw_path);
+            }
+
+            // Wait for FPGA bitstream programming to complete if in progress
+            println!("[*] Waiting for FPGA bitstream to be ready...");
+            let mut wait_count = 0;
+            loop {
+                match fpga::get_fpga_status() {
+                    fpga::FpgaStatus::Ready => {
+                        println!("[+] FPGA bitstream is ready! Proceeding with BOSA & switch init.");
+                        break;
+                    }
+                    fpga::FpgaStatus::Failed => {
+                        eprintln!("[-] FPGA bitstream programming failed in kernel! Micro-OLT not available.");
+                        return;
+                    }
+                    fpga::FpgaStatus::Programming | fpga::FpgaStatus::NotStarted => {
+                        if wait_count % 5 == 0 {
+                            println!("[*] FPGA bitstream is programming in kernel ({wait_count}s elapsed)...");
+                        }
+                    }
+                    fpga::FpgaStatus::Unknown => {
+                        if wait_count > 3 {
+                            break;
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_secs(1));
+                wait_count += 1;
+                if wait_count > 90 {
+                    eprintln!("[-] Timeout waiting for FPGA bitstream readiness.");
+                    return;
+                }
+            }
+
+            let _ = bosa::init_optical_transceiver();
+            setup_bridge();
+
+            // Auto-register connected sub-gateway H3CT685DF998
+            {
+                let mut engine = pon_engine_hw.lock().unwrap();
+                let vendor = *b"H3TC";
+                let sn = [0x68, 0x5D, 0xF9, 0x98];
+                let onu = engine.register_onu(vendor, sn);
+                let onu_id = onu.onu_id;
+                let act_frames = engine.activate_onu(onu_id);
+                let omci_frames = engine.build_omci_provisioning(onu_id);
+                drop(engine);
+
+                for f in &act_frames {
+                    let _ = bosa::send_ploam_msg(&f.to_bytes());
+                    thread::sleep(Duration::from_millis(10));
+                }
+                for f in &omci_frames {
+                    let _ = omci::send_omci_frame(onu_id, f);
+                    thread::sleep(Duration::from_millis(20));
+                }
+                let _ = bosa::set_fttr_carrier(onu_id as u32, true);
+                println!("[+] Sub-gateway H3CT685DF998 registered & activated on fttr{} (State: O5Operation).", onu_id);
+            }
+        });
+    }
+
+    // 3. Background PLOAM discovery broadcast & reception thread
     {
         let pon_engine_ploam = pon_engine.clone();
         thread::spawn(move || {
@@ -567,17 +616,6 @@ fn main() {
                 thread::sleep(Duration::from_millis(200));
             }
         });
-    }
-
-    // 3. Start IPC Server
-    if let Ok(listener) = ipc::create_socket_listener() {
-        start_ipc_server(
-            listener,
-            devices.clone(),
-            pon_engine.clone(),
-            mqtt_client_arc.clone(),
-        );
-        println!("[+] IPC socket server listening on {}", ipc::SOCKET_PATH);
     }
 
     // 4. Connect to MQTT Broker
