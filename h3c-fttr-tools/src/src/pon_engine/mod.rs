@@ -93,10 +93,13 @@ impl PonEngine {
 
         // 1. MIB Reset
         frames.push(OmciMessage::mib_reset(self.next_tx_id()));
-        // 2. LOID Authentication (ME 65530 / 0xFFFA - China Unicom / H3C standard)
-        frames.push(OmciMessage::loid_auth_success(self.next_tx_id()));
+        // 2. LOID Password (出厂默认 0000000000)
+        frames.push(OmciMessage::loid_auth_password(self.next_tx_id(), "0000000000"));
+        // 3. LOID Authentication (ME 65530 / 0xFFFA - subGateway, Auth Status = 1)
         frames.push(OmciMessage::loid_auth_with_name(self.next_tx_id(), "subGateway"));
-        // 3. Provision T-CONT
+        // 4. LOID Authentication Success confirmation
+        frames.push(OmciMessage::loid_auth_success(self.next_tx_id()));
+        // 5. Provision T-CONT
         frames.push(OmciMessage::create_tcont(self.next_tx_id(), tcont_inst, alloc_id));
         // 4. Provision GEM Port
         frames.push(OmciMessage::create_gem_port(self.next_tx_id(), gem_port_id, tcont_inst));

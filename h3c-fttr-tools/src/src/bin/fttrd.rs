@@ -237,14 +237,18 @@ fn start_ipc_server(
                     if let Ok(id) = line["AUTH ".len()..].trim().parse::<u8>() {
                         let mut engine = pon_engine.lock().unwrap();
                         let tx1 = engine.next_tx_id();
-                        let f1 = omci::OmciMessage::loid_auth_success(tx1);
+                        let f1 = omci::OmciMessage::loid_auth_password(tx1, "0000000000");
                         let tx2 = engine.next_tx_id();
                         let f2 = omci::OmciMessage::loid_auth_with_name(tx2, "subGateway");
+                        let tx3 = engine.next_tx_id();
+                        let f3 = omci::OmciMessage::loid_auth_success(tx3);
                         drop(engine);
 
                         let _ = omci::send_omci_frame(id, &f1);
                         thread::sleep(Duration::from_millis(20));
                         let _ = omci::send_omci_frame(id, &f2);
+                        thread::sleep(Duration::from_millis(20));
+                        let _ = omci::send_omci_frame(id, &f3);
 
                         let mut resp = IpcResponse::ok("auth_sent");
                         resp.onu_id = Some(id);
