@@ -6,6 +6,9 @@ license = "GPL-2.0-only"
 description = "H3C HM2004-DU FTTR Micro-OLT utilities and controller daemon"
 repository = "https://github.com/pbs05/openwrt-pon-userspace"
 
+[dependencies]
+mqttrs2 = "0.1.0"
+
 [[bin]]
 name = "fttrctl"
 path = "src/bin/fttrctl.rs"

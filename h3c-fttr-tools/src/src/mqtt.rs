@@ -1,164 +1,177 @@
 // SPDX-License-Identifier: GPL-2.0-only
+use std::convert::TryFrom;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
+use mqttrs2::*;
 
+/// A lightweight, robust MQTT 3.1.1 client using `mqttrs2` protocol codec
+/// over a standard synchronous `TcpStream`.
 pub struct MqttClient {
     stream: TcpStream,
+    read_buf: Vec<u8>,
 }
 
 impl MqttClient {
+    /// Connects to the local/remote MQTT broker and completes the MQTT 3.1.1 handshake.
     pub fn connect(addr: &str, client_id: &str) -> io::Result<Self> {
         let mut stream = TcpStream::connect(addr)?;
-        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
 
-        // Construct CONNECT packet
-        let mut payload = Vec::new();
-        // Client ID string
-        payload.extend_from_slice(&(client_id.len() as u16).to_be_bytes());
-        payload.extend_from_slice(client_id.as_bytes());
+        // 1. Build and serialize CONNECT packet
+        let connect = Connect {
+            protocol: Protocol::MQTT311,
+            keep_alive: 60,
+            client_id,
+            clean_session: true,
+            last_will: None,
+            username: None,
+            password: None,
+        };
 
-        let mut var_header = Vec::new();
-        var_header.extend_from_slice(&[0x00, 0x04, b'M', b'Q', b'T', b'T']); // Protocol Name
-        var_header.push(0x04); // Protocol Level (MQTT 3.1.1)
-        var_header.push(0x02); // Clean Session flag
-        var_header.extend_from_slice(&60u16.to_be_bytes()); // Keep Alive (60s)
+        let mut send_buf = vec![0u8; 128 + client_id.len()];
+        let n = encode_slice(&Packet::Connect(connect), &mut send_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("MQTT connect encode error: {e:?}")))?;
+        stream.write_all(&send_buf[..n])?;
 
-        let mut packet = vec![0x10]; // CONNECT packet type
-        let rem_len = var_header.len() + payload.len();
-        packet.extend(encode_remaining_length(rem_len));
-        packet.extend(var_header);
-        packet.extend(payload);
+        // 2. Read and validate CONNACK packet
+        let mut ack_buf = [0u8; 4];
+        stream.read_exact(&mut ack_buf)?;
+        let (_, pkt) = decode_slice_with_len(&ack_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("MQTT connack decode error: {e:?}")))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete CONNACK packet"))?;
 
-        stream.write_all(&packet)?;
-
-        // Read CONNACK (0x20, 0x02, session_present, return_code)
-        let mut ack = [0u8; 4];
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.read_exact(&mut ack)?;
-        stream.set_read_timeout(Some(Duration::from_millis(200)))?;
-
-        if ack[0] != 0x20 || ack[3] != 0x00 {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionRefused,
-                format!("MQTT connection rejected, return code: {}", ack[3]),
-            ));
+        match pkt {
+            Packet::Connack(connack) => {
+                if connack.code != ConnectReturnCode::Accepted {
+                    return Err(io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        format!("MQTT connection rejected, return code: {:?}", connack.code),
+                    ));
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Expected CONNACK packet from broker",
+                ));
+            }
         }
 
-        Ok(MqttClient { stream })
-    }
+        // Configure short timeout for polling in main worker loop
+        stream.set_read_timeout(Some(Duration::from_millis(500)))?;
 
-    pub fn try_clone(&self) -> io::Result<Self> {
         Ok(MqttClient {
-            stream: self.stream.try_clone()?,
+            stream,
+            read_buf: Vec::with_capacity(4096),
         })
     }
 
+    /// Clones the underlying socket handle (useful for concurrent publishing while listening)
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(MqttClient {
+            stream: self.stream.try_clone()?,
+            read_buf: Vec::new(),
+        })
+    }
+
+    /// Subscribes to a given MQTT topic path with QoS 0
     pub fn subscribe(&mut self, topic: &str) -> io::Result<()> {
-        let mut var_header = Vec::new();
-        var_header.extend_from_slice(&1u16.to_be_bytes()); // Packet ID = 1
+        let sub = Subscribe {
+            pid: Pid::try_from(1).unwrap_or_default(),
+            topics: vec![SubscribeTopic {
+                topic_path: topic.to_string(),
+                qos: QoS::AtMostOnce,
+            }],
+        };
 
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&(topic.len() as u16).to_be_bytes());
-        payload.extend_from_slice(topic.as_bytes());
-        payload.push(0x00); // Requested QoS 0
-
-        let mut packet = vec![0x82]; // SUBSCRIBE packet type
-        let rem_len = var_header.len() + payload.len();
-        packet.extend(encode_remaining_length(rem_len));
-        packet.extend(var_header);
-        packet.extend(payload);
-
-        self.stream.write_all(&packet)
+        let mut send_buf = vec![0u8; 128 + topic.len()];
+        let n = encode_slice(&Packet::Subscribe(sub), &mut send_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("MQTT subscribe encode error: {e:?}")))?;
+        self.stream.write_all(&send_buf[..n])
     }
 
+    /// Publishes a payload to the designated topic with QoS 0
     pub fn publish(&mut self, topic: &str, data: &[u8]) -> io::Result<()> {
-        let mut var_header = Vec::new();
-        var_header.extend_from_slice(&(topic.len() as u16).to_be_bytes());
-        var_header.extend_from_slice(topic.as_bytes());
+        let publish = Publish {
+            dup: false,
+            qospid: QosPid::AtMostOnce,
+            retain: false,
+            topic_name: topic,
+            payload: data,
+        };
 
-        let mut packet = vec![0x30]; // PUBLISH packet type (QoS 0)
-        let rem_len = var_header.len() + data.len();
-        packet.extend(encode_remaining_length(rem_len));
-        packet.extend(var_header);
-        packet.extend_from_slice(data);
-
-        self.stream.write_all(&packet)
+        let mut send_buf = vec![0u8; 128 + topic.len() + data.len()];
+        let n = encode_slice(&Packet::Publish(publish), &mut send_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("MQTT publish encode error: {e:?}")))?;
+        self.stream.write_all(&send_buf[..n])
     }
 
+    /// Sends a PINGREQ heartbeat packet (2 bytes)
     pub fn ping(&mut self) -> io::Result<()> {
-        self.stream.write_all(&[0xC0, 0x00])
+        let mut send_buf = [0u8; 4];
+        let n = encode_slice(&Packet::Pingreq, &mut send_buf)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("MQTT pingreq encode error: {e:?}")))?;
+        self.stream.write_all(&send_buf[..n])
     }
 
+    /// Streams and decodes incoming packets with full TCP framing / fragmentation handling.
+    /// Returns `Ok(Some((topic, payload)))` when a PUBLISH packet arrives.
+    /// Returns `Ok(None)` on read timeout (no data available right now).
     pub fn read_packet(&mut self) -> io::Result<Option<(String, Vec<u8>)>> {
-        let mut header = [0u8; 1];
-        match self.stream.read_exact(&mut header) {
-            Ok(()) => {}
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
-                return Ok(None);
+        loop {
+            // 1. Process any complete packets already buffered in `read_buf`
+            if !self.read_buf.is_empty() {
+                match decode_slice_with_len(&self.read_buf) {
+                    Ok(Some((consumed_len, packet))) => {
+                        let extracted_msg = match packet {
+                            Packet::Publish(p) => Some((p.topic_name.to_string(), p.payload.to_vec())),
+                            _ => None,
+                        };
+                        // Now packet borrow ends, we can drain the consumed bytes
+                        self.read_buf.drain(..consumed_len);
+
+                        if let Some(msg) = extracted_msg {
+                            return Ok(Some(msg));
+                        }
+                        // Non-publish packet (Suback, Pingresp, etc.) was consumed, continue loop
+                        continue;
+                    }
+                    Ok(None) => {
+                        // Incomplete packet in buffer; proceed to read more bytes from socket
+                    }
+                    Err(e) => {
+                        // Protocol framing error; clear buffer to prevent deadlocks
+                        self.read_buf.clear();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("MQTT stream decode error: {e:?}"),
+                        ));
+                    }
+                }
             }
-            Err(e) => return Err(e),
-        }
 
-        let packet_type = header[0] >> 4;
-        let rem_len = decode_remaining_length(&mut self.stream)?;
-
-        if packet_type == 3 {
-            // PUBLISH packet
-            let mut buf = vec![0u8; rem_len];
-            self.stream.read_exact(&mut buf)?;
-
-            if buf.len() < 2 {
-                return Ok(None);
+            // 2. Read incoming chunk from the TCP stream
+            let mut chunk = [0u8; 2048];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "MQTT broker closed connection",
+                    ));
+                }
+                Ok(n) => {
+                    self.read_buf.extend_from_slice(&chunk[..n]);
+                    // Loop back to decode the newly accumulated bytes
+                }
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                    return Ok(None);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
             }
-            let topic_len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
-            if buf.len() < 2 + topic_len {
-                return Ok(None);
-            }
-            let topic = String::from_utf8_lossy(&buf[2..2 + topic_len]).to_string();
-            let payload = buf[2 + topic_len..].to_vec();
-
-            return Ok(Some((topic, payload)));
-        } else {
-            // Drain other packets (e.g. SUBACK, PINGRESP)
-            let mut drain = vec![0u8; rem_len];
-            let _ = self.stream.read_exact(&mut drain);
-        }
-
-        Ok(None)
-    }
-}
-
-fn encode_remaining_length(mut len: usize) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    loop {
-        let mut byte = (len % 128) as u8;
-        len /= 128;
-        if len > 0 {
-            byte |= 128;
-        }
-        bytes.push(byte);
-        if len == 0 {
-            break;
         }
     }
-    bytes
-}
-
-fn decode_remaining_length(stream: &mut TcpStream) -> io::Result<usize> {
-    let mut multiplier = 1;
-    let mut value = 0;
-    let mut byte_buf = [0u8; 1];
-
-    loop {
-        stream.read_exact(&mut byte_buf)?;
-        let byte = byte_buf[0];
-        value += ((byte & 127) as usize) * multiplier;
-        if (byte & 128) == 0 {
-            break;
-        }
-        multiplier *= 128;
-    }
-    Ok(value)
 }
